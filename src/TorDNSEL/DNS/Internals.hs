@@ -64,7 +64,7 @@ import qualified Control.Monad.State as S
 import Control.Monad.Trans (lift)
 import Control.DeepSeq
 import Data.Bits ((.|.), (.&.), xor, shiftL, shiftR, testBit, setBit)
-import Data.List (foldl')
+import qualified Data.List as List
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Internal as B
 import qualified Data.ByteString.Lazy as L
@@ -78,7 +78,9 @@ import Foreign.Ptr (plusPtr)
 
 import Data.Binary (Binary(..), Get, getWord8, putWord8, Word16, Word32)
 import Data.Binary.Get
-  (runGet, getWord16be, getByteString, bytesRead, lookAhead, skip, isEmpty)
+  ( runGet, runGetOrFail, getWord16be, getByteString, bytesRead, lookAhead, skip
+  , isEmpty )
+import Data.Word (Word8)
 import Data.Binary.Put (runPut, putWord16be, putByteString, PutM)
 
 import TorDNSEL.Util
@@ -170,8 +172,11 @@ encodeMessage = Packet . B.concat . L.toChunks . runPutMessage . putPacket
 -- `cereal`. ( See `Socks`. )
 decodeMessage :: Packet -> IO (Maybe Message)
 decodeMessage pkt =
-  ( E.evaluate $ Just $!! unsafeDecodeMessage pkt )
-    `E.catch` \(E.ErrorCall _) -> return Nothing
+  E.evaluate (force decoded) `E.catch` \(_ :: E.ErrorCall) -> return Nothing
+  where
+    decoded = case runGetOrFail (getPacket pkt) (L.fromChunks [unPacket pkt]) of
+      Left _          -> Nothing
+      Right (_, _, m) -> Just m
 
 -- | Lazily decode a DNS message. If parsing fails, the result will contain an
 -- exceptional value at some level.
@@ -312,7 +317,7 @@ instance BinaryPacket Message where
           0 -> StandardQuery
           1 -> InverseQuery
           2 -> ServerStatusRequest
-          _ -> error "unknown opcode"
+          _ -> UnknownOpCode (fromIntegral $ flags `shiftR` 11 .&. 0xf)
         rCode = case flags .&. 0xf of
           0 -> NoError
           1 -> FormatError
@@ -320,11 +325,18 @@ instance BinaryPacket Message where
           3 -> NXDomain
           4 -> NotImplemented
           5 -> Refused
-          _ -> error "unknown rcode"
-    [qdCount,anCount,nsCount,arCount] <- replicateM 4 getWord16be
-    question:_ <- replicateM (fromIntegral qdCount) (getPacket pkt)
-    [answers,authority,additional] <- forM [anCount, nsCount, arCount] $ \n ->
-      replicateM (fromIntegral n) (getPacket pkt)
+          _ -> UnknownRCode (fromIntegral $ flags .&. 0xf)
+    qdCount <- getWord16be
+    anCount <- getWord16be
+    nsCount <- getWord16be
+    arCount <- getWord16be
+    questions <- replicateM (fromIntegral qdCount) (getPacket pkt)
+    question <- case questions of
+      q:_ -> return q
+      []  -> fail "no question"
+    answers    <- replicateM (fromIntegral anCount) (getPacket pkt)
+    authority  <- replicateM (fromIntegral nsCount) (getPacket pkt)
+    additional <- replicateM (fromIntegral arCount) (getPacket pkt)
     isEnd <- isEmpty
     () <- unless isEnd $
       fail "unexpected extra bytes after message"
@@ -343,12 +355,13 @@ instance BinaryPacket Message where
     putPacket question
     mapM_ (mapM_ putPacket) [answers, authority, additional]
     where
-      flags = foldl' (.) id [flip setBit bit | (flag,bit) <- bitFlags, flag]
+      flags = List.foldl' (.) id [flip setBit bit | (flag,bit) <- bitFlags, flag]
       bitFlags = [qr,aa,tc,rd,ra,ad,cd] `zip` [15,10,9,8,7,5,4]
       opCode' = (`shiftL` 11) $ case opCode of
         StandardQuery       -> 0
         InverseQuery        -> 1
         ServerStatusRequest -> 2
+        UnknownOpCode c     -> fromIntegral c .&. 0xf
       rCode' = case rCode of
         NoError        -> 0
         FormatError    -> 1
@@ -356,6 +369,7 @@ instance BinaryPacket Message where
         NXDomain       -> 3
         NotImplemented -> 4
         Refused        -> 5
+        UnknownRCode c -> fromIntegral c .&. 0xf
 
 -- | A question to the name server.
 data Question = Question
@@ -460,7 +474,11 @@ instance BinaryPacket ResourceRecord where
       (IN,TSOA) -> do
         mName <- getPacket pkt
         rName <- getPacket pkt
-        [serial,refresh,retry,expire,minim] <- replicateM 5 get
+        serial  <- get
+        refresh <- get
+        retry   <- get
+        expire  <- get
+        minim   <- get
         return $! SOA name ttl mName rName serial refresh retry expire minim
       _         -> do
         rData <- getByteString $ fromIntegral len
@@ -488,7 +506,8 @@ instance BinaryPacket ResourceRecord where
     putPacket name
     lift $ put TSOA >> put IN >> put ttl
     incrOffset 10
-    [mName',rName'] <- mapM compressNameStatefully [mName, rName]
+    mName' <- compressNameStatefully mName
+    rName' <- compressNameStatefully rName
     lift $ do
       putWord16be . fromIntegral $ B.length mName' + B.length rName' + 20
       mapM_ putByteString [mName', rName']
@@ -521,7 +540,7 @@ instance BinaryPacket DomainName where
     where
       domainLen (DomainName name) =
         1 + sum' (map ((1+) . B.length . unLabel) name)
-      sum' = foldl' (+) 0
+      sum' = List.foldl' (+) 0
 
       getLabels p = do
         len <- lookAhead getWord8
@@ -534,7 +553,9 @@ instance BinaryPacket DomainName where
                 let priorLen = fromIntegral (p - ptr)
                     -- names can't overlap
                     prior = B.take priorLen . B.drop (fromIntegral ptr) $ pkt
-                return $! runGet (getLabels ptr) (L.fromChunks [prior])
+                case runGetOrFail (getLabels ptr) (L.fromChunks [prior]) of
+                  Left (_, _, e)     -> fail e
+                  Right (_, _, ls)   -> return ls
             | len > 63             -> fail "label too long"
             | otherwise            -> liftM2 (:) get (getLabels p)
 
@@ -547,6 +568,7 @@ newtype Label = Label { unLabel :: ByteString }
   deriving (Eq, Ord, Show)
 
 instance NFData Label where
+  rnf = rwhnf
 
 instance Binary Label where
   get = do
@@ -568,18 +590,22 @@ data RCode
                    -- kind of query.
   | Refused        -- ^ The name server refuses to perform the specified
                    -- operation for policy reasons.
+  | UnknownRCode !Word8 -- ^ Any other response code.
   deriving (Eq, Show)
 
 instance NFData RCode where
+  rnf = rwhnf
 
 -- | Specifies the kind of query in a message set by the originator.
 data OpCode
   = StandardQuery       -- ^ A standard query. We only support this opcode.
   | InverseQuery        -- ^ An inverse query. (obsolete)
   | ServerStatusRequest -- ^ A server status request.
+  | UnknownOpCode !Word8 -- ^ Any other opcode (e.g. NOTIFY or UPDATE).
   deriving (Eq, Show)
 
 instance NFData OpCode where
+  rnf = rwhnf
 
 -- | The TYPE or QTYPE values that appear in resource records or questions,
 -- respectively.
@@ -592,6 +618,7 @@ data Type
   deriving (Eq, Show)
 
 instance NFData Type where
+  rnf = rwhnf
 
 instance Binary Type where
   get = do
@@ -618,6 +645,7 @@ data Class
   -- XXX support *
 
 instance NFData Class where
+  rnf = rwhnf
 
 instance Binary Class where
   get = do

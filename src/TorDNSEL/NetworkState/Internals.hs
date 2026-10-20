@@ -59,14 +59,14 @@ import Control.Arrow ((&&&))
 import Control.Monad (liftM2, when)
 import Control.Monad.Fix (fix)
 import Control.Monad.State
-  (MonadState, StateT, runStateT, execStateT, get, gets, put, MonadIO, liftIO)
+  (StateT, runStateT, execStateT, get, gets, put, MonadIO, liftIO)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Chan (newChan, readChan, writeChan)
 import Control.Concurrent.MVar (MVar, newMVar, readMVar, swapMVar)
 import qualified Control.Exception as E
 import qualified Data.ByteString.Char8 as B
 import Data.ByteString.Char8 (ByteString)
-import Data.List (foldl')
+import qualified Data.List as L
 import Data.Maybe
 import qualified Data.Map as M
 import Data.Map (Map)
@@ -75,7 +75,7 @@ import Data.Set (Set)
 import Data.Time (UTCTime, getCurrentTime, diffUTCTime)
 import Network.Socket
   ( HostAddress, SockAddr, Socket, Family(AF_INET), SocketType(Stream)
-  , socket, connect, sClose, socketToHandle )
+  , socket, connect, socketToHandle )
 import System.IO (IOMode(ReadWriteMode))
 import System.IO.Unsafe (unsafePerformIO)
 
@@ -222,7 +222,7 @@ handleMessage
   -> StateT ManagerState IO NetworkStateManagerConfig
 handleMessage _net conf (NewDescriptors ds) = do
   now <- liftIO getCurrentTime
-  networkState' <- gets $ \s -> foldl' (newDescriptor now) (networkState s) ds
+  networkState' <- gets $ \s -> L.foldl' (newDescriptor now) (networkState s) ds
   modifyNetworkState networkState'
   mbTestState <- gets exitTestState
   whenJust mbTestState $ \testState ->
@@ -232,7 +232,7 @@ handleMessage _net conf (NewDescriptors ds) = do
 
 handleMessage _net conf (NewNetworkStatus rss) = do
   now <- liftIO getCurrentTime
-  networkState' <- gets $ \s -> expireOldInfo now $ foldl' (newRouterStatus now)
+  networkState' <- gets $ \s -> expireOldInfo now $ L.foldl' (newRouterStatus now)
                                                            (networkState s) rss
   modifyNetworkState networkState'
   mbTestState <- gets exitTestState
@@ -448,7 +448,7 @@ startTorController
 startTorController net conf mbDelay = liftIO $ do
   log Info "Starting Tor controller."
   (r,tid) <- tryForkLinkIO $ do
-    bracketOnError' (socket AF_INET Stream tcpProtoNum) sClose $ \sock -> do
+    bracketOnError' (socket AF_INET Stream tcpProtoNum) closeSocket $ \sock -> do
       connect sock $ nsmcfTorControlAddr conf
       bracketOnError'
         ( socketToHandle sock ReadWriteMode >>=
@@ -554,7 +554,7 @@ terminateExitTests testState = do
     terminateStorageManager Nothing $ storageManager testState
   modify' $ \s ->
     s { exitTestState = Nothing
-      , deadThreads = foldl' (flip S.insert) (deadThreads s)
+      , deadThreads = L.foldl' (flip S.insert) (deadThreads s)
                              [ threadId $ exitTestInitiator testState
                              , threadId $ exitTestServer testState
                              , threadId $ storageManager testState ] }
@@ -564,9 +564,9 @@ terminateExitTests testState = do
 
 -- | Merge a list of exit addresses from the store with the network state.
 mergeExitAddrsWithNetState :: [ExitAddress] -> NetworkState -> NetworkState
-mergeExitAddrsWithNetState = flip $ foldl' mergeAddr where
+mergeExitAddrsWithNetState = flip $ L.foldl' mergeAddr where
   mergeAddr (NetworkState addrs rtrs) (ExitAddress rid pub status exits) =
-    NetworkState (foldl' insertAddr addrs $ M.keys exits)
+    NetworkState (L.foldl' insertAddr addrs $ M.keys exits)
                  (alter' updateRouter rid rtrs)
     where
       insertAddr addrs' addr = insertAddress addr rid addrs'
@@ -656,19 +656,19 @@ expireOldInfo now s = s { nsAddrs = addrs'', nsRouters = routers'' }
       where
         update test' = (recentAddrs, r { rtrTestResults = test' })
         recentAddrs =
-          foldl' (\as addr -> deleteAddress addr rid as) addrs
+          L.foldl' (\as addr -> deleteAddress addr rid as) addrs
                  (M.keys $ maybe id (M.delete . descListenAddr) d oldExits)
         (oldExits,recentExits) = M.partition isTestOld (tstAddresses test)
     updateTests addrs _ r = (addrs, r)
     (oldRouters,routers') = M.partition isRouterOld (nsRouters s)
-    addrs' = foldl' deleteAddrs (nsAddrs s) (M.toList oldRouters)
+    addrs' = L.foldl' deleteAddrs (nsAddrs s) (M.toList oldRouters)
     isRouterOld r = now `diffUTCTime` rtrLastStatus r > maxRouterAge
     isTestOld tested = now `diffUTCTime` tested > maxExitTestAge
     deleteAddrs addrs (rid,r) =
       maybe id (\d -> deleteAddress (descListenAddr d) rid) (rtrDescriptor r) .
       maybe id (deleteExitAddresses rid) (rtrTestResults r) $ addrs
     deleteExitAddresses rid test addrs =
-      foldl' (\as addr -> deleteAddress addr rid as) addrs
+      L.foldl' (\as addr -> deleteAddress addr rid as) addrs
              (M.keys $ tstAddresses test)
     maxRouterAge = 24 * 60 * 60
     maxExitTestAge = 24 * 60 * 60

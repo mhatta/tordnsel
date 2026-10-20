@@ -27,9 +27,7 @@ module TorDNSEL.ExitTest.Request (
   ) where
 
 import Control.Arrow ((***))
-import Control.Applicative
 import Control.Monad
-import Data.Monoid
 import qualified Data.ByteString.Char8 as B
 import Data.Char (isSpace, toLower)
 import qualified Data.Map as M
@@ -66,7 +64,7 @@ createRequest host port cookie =
 -- request if it's well-formatted, otherwise return 'Nothing'.
 getRequest :: Handle -> IO (Maybe Cookie)
 getRequest client =
-    CB.sourceHandle client $= CB.isolate maxReqLen $$ do
+    runConduit $ CB.sourceHandle client .| CB.isolate maxReqLen .| do
       reqline <- c_line_crlf
       hs      <- accHeaders []
       case checkHeaders reqline hs of
@@ -85,7 +83,7 @@ getRequest client =
 
     checkHeaders reqline headers = do
       contentType <- "content-type" `M.lookup` headers
-      contentLen  <- readInt =<< "content-length" `M.lookup` headers
+      contentLen  <- hush . readInt =<< "content-length" `M.lookup` headers
       guard $ reqline `elem` ["POST / HTTP/1.0", "POST / HTTP/1.1"]
       guard $ contentType == "application/octet-stream"
       guard $ contentLen == cookieLen

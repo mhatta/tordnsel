@@ -34,7 +34,7 @@ spawn :: IO a -> IO (Future a)
 spawn io = do
   mv <- newEmptyMVar
   callingThread <- myThreadId
-  forkLinkIO . E.mask $ \restore -> do
+  _ <- forkLinkIO $ E.mask $ \restore -> do
     r <- either (Left . extractReason) (Right . id) `fmap` E.try (restore io)
     putMVar mv r
     unlinkThread callingThread

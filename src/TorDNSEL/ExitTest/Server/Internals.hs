@@ -21,13 +21,11 @@
 module TorDNSEL.ExitTest.Server.Internals where
 
 import Prelude hiding (log)
-import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan, isEmptyChan)
 import Control.Concurrent.QSemN (QSemN, newQSemN, waitQSemN, signalQSemN)
 import qualified Control.Exception as E
 import Control.Monad (when, forM, foldM, forever)
 import Control.Monad.Fix (fix)
 import Control.Monad.Trans (lift)
-import Control.Applicative
 import qualified Data.ByteString.Char8 as B
 import qualified Data.Foldable as F
 import qualified Data.Map as M
@@ -37,7 +35,7 @@ import qualified Data.Set as S
 import Data.Set (Set)
 import Data.Time (UTCTime, getCurrentTime)
 import Network.Socket
-  ( HostAddress, Socket, SockAddr(SockAddrInet), accept, sClose, getSocketName
+  ( HostAddress, Socket, SockAddr(SockAddrInet), accept, getSocketName
   , socketToHandle )
 import System.IO (hClose, IOMode(ReadWriteMode))
 import System.IO.Error (isEOFError)
@@ -70,7 +68,7 @@ instance Eq ExitTestServerConfig where
 
 -- | An internal type representing the current exit test server state.
 data ServerState = ServerState
-  { serverChan      :: !(Chan ServerMessage)
+  { serverChan      :: !(MsgChan ServerMessage)
   , handlerSem      :: !QSemN
   , handlers        :: !(Set ThreadId)
   , listenerThreads :: !(Map ThreadId Listener)
@@ -84,7 +82,7 @@ data Listener = Listener
   }
 
 -- | The thread responsible for a given listening socket. If a socket is owned
--- by the supervisor, we won't attempt to 'sClose' it. The idea is to prevent
+-- by the supervisor, we won't attempt to 'closeSocket' it. The idea is to prevent
 -- unnecessarily closing a socket that requires root privileges to open.
 data SocketOwner
   = SupervisorOwned -- ^ Owned by the supervisor thread.
@@ -109,15 +107,15 @@ startExitTestServer
   :: [(SockAddr, Maybe Socket)] -> ExitTestServerConfig -> IO ExitTestServer
 startExitTestServer socks initConf = do
   log Info "Starting exit test server."
-  chan <- newChan
+  chan <- newMsgChan
   tid <- startLink $ \signal -> do
-    setTrapExit $ (writeChan chan .) . Exit
+    setTrapExit $ (writeMsgChan chan .) . Exit
     sem <- newQSemN . fromIntegral . etscfConcClientLimit $ initConf
     listeners <- fmap catMaybes . forM socks $ \(addr,mbSock) -> runMaybeT $ do
       sock <- reopenSocketIfClosed addr mbSock
       let owner | mbSock == Just sock = SupervisorOwned
                 | otherwise           = ExitTestServerOwned
-      tid <- lift $ startListenerThread ((writeChan chan .) . NewClient) sem
+      tid <- lift $ startListenerThread ((writeMsgChan chan .) . NewClient) sem
                                         owner sock addr
       return (tid, Listener addr sock owner)
     signal
@@ -125,18 +123,18 @@ startExitTestServer socks initConf = do
     let initConf' = initConf { etscfListenAddrs =
                                  S.fromList $ map (listenAddr . snd) listeners }
         initState = ServerState chan sem S.empty (M.fromList listeners) S.empty
-    fix (\loop (!conf,!s) -> readChan chan >>= handleMessage conf s >>= loop)
+    fix (\loop (!conf,!s) -> readMsgChan chan >>= handleMessage conf s >>= loop)
         (initConf', initState)
 
-  return $ ExitTestServer (writeChan chan) tid
+  return $ ExitTestServer (writeMsgChan chan) tid
 
 -- | Start a listener thread, returning its 'ThreadId'.
 startListenerThread :: (Socket -> HostAddress -> IO ()) -> QSemN -> SocketOwner
                     -> Socket -> SockAddr -> IO ThreadId
 startListenerThread notifyServerNewClient sem owner listener addr =
-  forkLinkIO . E.block . finallyCloseSocket . forever $ do
+  forkLinkIO $ E.mask $ \restore -> finallyCloseSocket . forever $ do
     waitQSemN sem 1
-    (client,SockAddrInet _ clientAddr) <- E.unblock (accept listener)
+    (client,SockAddrInet _ clientAddr) <- restore (accept listener)
       `E.catch` \(e :: E.SomeException) -> signalQSemN sem 1 >> E.throwIO e
     let clientAddr' = ntohl clientAddr
     log Debug "Accepted exit test client from " (inet_htoa clientAddr') '.'
@@ -145,7 +143,7 @@ startListenerThread notifyServerNewClient sem owner listener addr =
     finallyCloseSocket = case owner of
       ExitTestServerOwned -> flip E.finally $ do
         log Notice "Closing exit test listener on " addr '.'
-        sClose listener
+        closeSocket listener
       SupervisorOwned -> id
 
 -- | Given an optional listening socket, return it if it's open. Otherwise,
@@ -156,7 +154,7 @@ reopenSocketIfClosed addr mbSock = MaybeT $ do
   if isOpen
     then return mbSock
     else do
-      whenJust mbSock sClose
+      whenJust mbSock closeSocket
       log Notice "Opening exit test listener on " addr '.'
       r <- E.try $ bindListeningTCPSocket addr
       case r of
@@ -229,7 +227,7 @@ handleMessage conf s (Reconfigure reconf signal) = do
     openListener addr = runMaybeT $ do
       sock <- reopenSocketIfClosed addr Nothing
       tid <- lift $ startListenerThread
-                      ((writeChan (serverChan s) .) . NewClient) (handlerSem s)
+                      ((writeMsgChan (serverChan s) .) . NewClient) (handlerSem s)
                       ExitTestServerOwned sock addr
       return (tid, Listener addr sock ExitTestServerOwned)
     (closeListeners,unchangedListeners) =
@@ -247,8 +245,8 @@ handleMessage _conf s (Terminate reason) = do
         (M.keys $ listenerThreads s)
   F.mapM_ (\tid -> terminateThread Nothing tid (killThread tid))
           (handlers s)
-  msgs <- untilM (isEmptyChan $ serverChan s) (readChan $ serverChan s)
-  sequence_ [sClose client | NewClient client _ <- msgs]
+  msgs <- drainMsgChan $ serverChan s
+  sequence_ [closeSocket client | NewClient client _ <- msgs]
   exit reason
 
 handleMessage conf s (Exit tid reason)
@@ -275,7 +273,7 @@ handleMessage conf s (Exit tid reason)
         let owner' | sock /= sock' = ExitTestServerOwned
                     | otherwise     = owner
             listener' = Listener addr sock' owner'
-        tid' <- startListenerThread ((writeChan (serverChan s) .) . NewClient)
+        tid' <- startListenerThread ((writeMsgChan (serverChan s) .) . NewClient)
                                     (handlerSem s) owner sock addr
         listener' `seq` return
           (conf, s { listenerThreads = M.insert tid' listener' .

@@ -22,10 +22,11 @@ import qualified Data.Map as M
 import Test.HUnit (Test(..), (@=?))
 
 import TorDNSEL.Config.Internals
+import TorDNSEL.Util (hush)
 
 tests = TestList . map TestCase $
-  [ Just config @=? parseConfigFile configFile
-  , Just config' @=? parseConfigArgs configArgs ]
+  [ Just config @=? hush (parseConfigFile configFile)
+  , Just config' @=? hush (parseConfigArgs configArgs) ]
 
 config' = toConfig
   [ "User"       ~> "nobody"

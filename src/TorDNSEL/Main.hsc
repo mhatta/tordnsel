@@ -63,6 +63,7 @@ module TorDNSEL.Main (
   ) where
 
 import Prelude hiding (log)
+import Control.Concurrent (rtsSupportsBoundThreads)
 import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
 import qualified Control.Exception as E
 import Control.Monad (when, liftM, forM, forM_)
@@ -84,7 +85,7 @@ import System.IO
   , IOMode(WriteMode, ReadWriteMode, AppendMode) )
 import System.IO.Error (isPermissionError)
 import Network.Socket
-  ( Socket, SockAddr(SockAddrInet), sClose, shutdown, ShutdownCmd(ShutdownSend)
+  ( Socket, SockAddr(SockAddrInet), shutdown, ShutdownCmd(ShutdownSend)
   , socketToHandle )
 
 import System.Exit (ExitCode(ExitSuccess, ExitFailure), exitWith)
@@ -105,9 +106,9 @@ import System.Posix.Resource
   ( ResourceLimits(..), ResourceLimit(..), Resource(ResourceOpenFiles)
   , getResourceLimit, setResourceLimit )
 import System.Posix.Types (UserID, GroupID)
+-- unix >= 2.8 exports UserEntry/GroupEntry as pattern synonyms, so import the
+-- module whole to get the field selectors with any unix version.
 import System.Posix.User
-  ( getEffectiveUserID, UserEntry(userID), GroupEntry(groupID)
-  , getUserEntryForName, getGroupEntryForName, setUserID, setGroupID )
 import Foreign.C (CString, CInt(..), withCString)
 
 import TorDNSEL.Config
@@ -129,14 +130,14 @@ import TorDNSEL.Util
 -- Constants
 
 -- | Minimum limit on open file descriptors under which we can run.
-minFileDesc :: ResourceLimit
-minFileDesc = ResourceLimit 128
+minFileDesc :: Integer
+minFileDesc = 128
 
 -- | Maximum limit on open file descriptors we can set with 'setResourceLimit'.
--- This should be relatively low because select(2) is O(n) in the number of open
--- fds. Once GHC begins using kqueue(2) and epoll(7), this limit can be lifted.
-maxFileDesc :: ResourceLimit
-maxFileDesc = ResourceLimit 4096
+-- The threaded RTS uses epoll(7)\/kqueue(2), so this no longer needs to be as
+-- low as it was with the select(2)-based I\/O manager.
+maxFileDesc :: Integer
+maxFileDesc = 16384
 
 -- | Number of file descriptors the process might need for everything but exit
 -- tests.
@@ -596,7 +597,7 @@ reconfigureListenersAndNetworkStateManager static conf errorRespond = do
         forM_ (M.assocs $ exitTestListeners s `M.difference` newListeners) $
           \(addr,mbSock) -> whenJust mbSock $ \sock -> do
             log Notice "Closing exit test listener on " addr '.'
-            liftIO $ sClose sock
+            liftIO $ closeSocket sock
   where
     updateListeners s =
       case cfTestConfig conf of
@@ -650,13 +651,13 @@ terminateProcess status static s mbWait = do
   forM_ (M.assocs $ exitTestListeners s) $ \(addr,mbSock) ->
     whenJust mbSock $ \sock -> do
       log Info "Closing exit test listener on " addr '.'
-      ignoreIOExn $ sClose sock
+      ignoreIOExn $ closeSocket sock
   log Info "Closing DNS listener."
-  ignoreIOExn . sClose $ dnsListener s
+  ignoreIOExn . closeSocket $ dnsListener s
   log Info "Closing statistics listener."
-  ignoreIOExn . sClose $ statsSocket static
+  ignoreIOExn . closeSocket $ statsSocket static
   log Info "Closing reconfigure listener."
-  ignoreIOExn . sClose $ reconfigSocket static
+  ignoreIOExn . closeSocket $ reconfigSocket static
   ignoreIOExn . hClose $ randomHandle static
   log Notice "All subsystems have terminated. Exiting now."
   terminateLogger mbWait
@@ -696,7 +697,11 @@ daemonize io = do
     forkProcess $ do
       setCurrentDirectory "/"
       mapM_ closeFd stdFds
+#if MIN_VERSION_unix(2,8,0)
+      nullFd <- openFd "/dev/null" ReadWrite defaultFileFlags
+#else
       nullFd <- openFd "/dev/null" ReadWrite Nothing defaultFileFlags
+#endif
       mapM_ (dupTo nullFd) stdFds
       closeFd nullFd
       io
@@ -708,60 +713,57 @@ daemonize io = do
 -- Helpers
 
 -- | Ensure that the current limit on open file descriptors is at least
--- @lowerLimit@ and at least the minimum of @cap@ and FD_SETSIZE. Return the
--- new current limit.
-setMaxOpenFiles :: ResourceLimit -> ResourceLimit -> IO Integer
-setMaxOpenFiles lowerLimit cap = do
-  let fdSetSize = ResourceLimit #{const FD_SETSIZE}
-
+-- @lowerLimit@, raising the soft limit (and the hard limit, if we're root) to
+-- at most @cap@. Return the new current limit.
+--
+-- With the threaded RTS, GHC's I\/O manager uses epoll(7)\/kqueue(2), so the
+-- old FD_SETSIZE restriction of the select(2)-based non-threaded RTS only
+-- applies when we were linked without @-threaded@.
+setMaxOpenFiles :: Integer -> Integer -> IO Integer
+setMaxOpenFiles lowerLimit cap0 = do
   euid <- getEffectiveUserID
   limits <- getResourceLimit ResourceOpenFiles
+  let fdSetSize = #{const FD_SETSIZE} :: Integer
+      cap | rtsSupportsBoundThreads = cap0
+          | otherwise               = cap0 `min` fdSetSize
+      hard = limitValue (hardLimit limits)
 
-  when (euid /= 0 && hardLimit limits < lowerLimit) $
+  when (euid /= 0 && maybe False (< lowerLimit) hard) $
     exitPrint NoPermission $
-      cat "The hard limit on file descriptors is set to " (hardLimit limits)
-          ", but we need at least " lowerLimit '.'
-  when (fdSetSize < lowerLimit) $
+      cat "The hard limit on file descriptors is set to "
+          (showLimit $ hardLimit limits) ", but we need at least "
+          lowerLimit '.'
+  when (cap < lowerLimit) $
     exitPrint Internal $
       cat "FD_SETSIZE is " fdSetSize ", but we need at least " lowerLimit
           " file descriptors."
 
   let newLimits limit
-        | euid /= 0 = limits { softLimit = limit }
-        | otherwise = limits { softLimit = limit, hardLimit = limit }
-      minHardLimit | euid /= 0 = min $ hardLimit limits
-                   | otherwise = id
-      most = minHardLimit $ cap `min` fdSetSize
-      unResourceLimit (ResourceLimit n) = n
-      unResourceLimit _ = error "unResourceLimit: bug"
+        | euid /= 0 = limits { softLimit = ResourceLimit limit }
+        | otherwise = limits { softLimit = ResourceLimit limit
+                             , hardLimit = ResourceLimit limit }
+      most | euid /= 0 = maybe cap (min cap) hard
+           | otherwise = cap
 
-  fmap unResourceLimit $ catchIO
+  catchIO
     (setResourceLimit ResourceOpenFiles (newLimits most) >> return most) $ \e ->
     do
 #ifdef OPEN_MAX
-      -- For OS X 10.5. This hasn't been tested.
-      let openMax = ResourceLimit #{const OPEN_MAX}
+      -- For macOS, where the kernel refuses limits above OPEN_MAX.
+      let openMax = #{const OPEN_MAX} :: Integer
       if not (isPermissionError e) && openMax < most
         then do setResourceLimit ResourceOpenFiles (newLimits openMax)
                 return openMax
-        else E.throwIO (E.IOException e)
+        else E.throwIO e
 #else
       E.throwIO e
 #endif
-
-instance Ord ResourceLimit where
-  ResourceLimitInfinity `compare` ResourceLimitInfinity = EQ
-  _ `compare` ResourceLimitInfinity = LT
-  ResourceLimitInfinity `compare` _ = GT
-  ResourceLimitUnknown `compare` ResourceLimitUnknown = EQ
-  _ `compare` ResourceLimitUnknown = LT
-  ResourceLimitUnknown `compare` _ = GT
-  ResourceLimit n `compare` ResourceLimit n' = n `compare` n'
-
-instance Show ResourceLimit where
-  show (ResourceLimit n) = show n
-  show ResourceLimitInfinity = "infinity"
-  show ResourceLimitUnknown = "unknown"
+  where
+    limitValue (ResourceLimit n) = Just n
+    limitValue _                 = Nothing
+    showLimit (ResourceLimit n)    = show n
+    showLimit ResourceLimitInfinity = "infinity"
+    showLimit ResourceLimitUnknown  = "unknown"
 
 -- | Set up the state or runtime directory with proper ownership and
 -- permissions.

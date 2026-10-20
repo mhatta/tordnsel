@@ -25,8 +25,8 @@ import TorDNSEL.Util
 tests = TestList [TestCase descriptorParses, fingerprint, TestCase exitPolicy]
 
 exitPolicy = do
-  let Just [ip1,ip2,ip3] = mapM inet_atoh ips
-      Just policy = parseExitPolicy $ parseDocument doc
+  let Right [ip1,ip2,ip3] = mapM inet_atoh ips
+      Right policy = parseExitPolicy $ parseDocument doc
   False @=? exitPolicyAccepts ip1 80 policy
   False @=? exitPolicyAccepts ip2 80 policy
   True @=? exitPolicyAccepts ip3 81 policy
@@ -35,8 +35,8 @@ exitPolicy = do
     doc = ["reject *:80","accept 18.244.0.18:*"]
 
 fingerprint = TestList . map TestCase $
-  [ Just rid @=? decodeBase16RouterID base16
-  , Just rid @=? decodeBase64RouterID base64
+  [ Just rid @=? hush (decodeBase16RouterID base16)
+  , Just rid @=? hush (decodeBase64RouterID base64)
   , base16 @=? encodeBase16RouterID rid ]
   where
     base16 = "ffcb46db1339da84674c70d7cb586434c4370441"

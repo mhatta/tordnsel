@@ -1,5 +1,3 @@
-{-# LANGUAGE ForeignFunctionInterface #-}
-
 -----------------------------------------------------------------------------
 -- |
 -- Module      : TorDNSEL.Random
@@ -7,9 +5,15 @@
 --
 -- Maintainer  : tup.tuple@googlemail.com
 -- Stability   : alpha
--- Portability : non-portable (FFI)
+-- Portability : portable
 --
--- Generating cryptographically strong pseudo-random data with OpenSSL.
+-- Generating cryptographically strong random data.
+--
+-- Earlier versions seeded OpenSSL's PRNG from a kernel random device and used
+-- @RAND_bytes@. Modern kernels provide a non-blocking, cryptographically
+-- strong CSPRNG through @\/dev\/urandom@, so we simply keep a handle to it
+-- open (it is opened before we chroot or drop privileges) and read from it
+-- directly. This removes the dependency on libcrypto.
 --
 -----------------------------------------------------------------------------
 
@@ -19,48 +23,44 @@ module TorDNSEL.Random (
   , seedPRNG
   ) where
 
+import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Monad (filterM)
 import qualified Data.ByteString as B
-import qualified Data.ByteString.Internal as B
 import System.Directory (doesFileExist)
-import System.IO (Handle, openFile, IOMode(ReadMode))
+import System.IO
+  (Handle, openFile, IOMode(ReadMode), hSetBuffering, BufferMode(NoBuffering))
+import System.IO.Unsafe (unsafePerformIO)
 
-import Foreign (Ptr, Word8, withForeignPtr, plusPtr)
-import Foreign.C.Types (CInt(..))
+-- | Serialise reads from the random device so that concurrent callers never
+-- receive overlapping or short reads.
+randomLock :: MVar ()
+{-# NOINLINE randomLock #-}
+randomLock = unsafePerformIO $ newMVar ()
 
-import TorDNSEL.Util
-
--- | Return @n@ bytes of random data, blocking until the PRNG is seeded.
+-- | Return @n@ bytes of random data read from the given random device.
 randBytes :: Handle -> Int -> IO B.ByteString
-randBytes random n = B.create n $ \p ->
-  untilM_ ((1 ==) `fmap` c_RAND_bytes p (fromIntegral n)) $
-    seedPRNG random
+randBytes random n = withMVar randomLock $ \_ -> go n []
+  where
+    go 0 acc = return $! B.concat (reverse acc)
+    go k acc = do
+      bs <- B.hGetSome random k
+      if B.null bs
+        then ioError $ userError "randBytes: unexpected EOF on random device"
+        else go (k - B.length bs) (bs : acc)
 
-foreign import ccall unsafe "openssl/rand.h RAND_bytes"
-  c_RAND_bytes :: Ptr Word8 -> CInt -> IO CInt
-
--- | Open a kernel random number device if one exists.
-openRandomDevice :: Monad m => IO (m Handle)
+-- | Open a kernel random number device if one exists. @\/dev\/urandom@ is
+-- preferred because it never blocks once the kernel CSPRNG is initialised.
+openRandomDevice :: IO (Either ShowS Handle)
 openRandomDevice = do
-  devs <- filterM doesFileExist ["/dev/srandom", "/dev/random", "/dev/urandom"]
+  devs <- filterM doesFileExist ["/dev/urandom", "/dev/random"]
   case devs of
-    dev:_ -> return `fmap` openFile dev ReadMode
-    []    -> return $ fail "Kernel random number device not found."
+    dev:_ -> do
+      h <- openFile dev ReadMode
+      hSetBuffering h NoBuffering
+      return (Right h)
+    []    -> return $ Left ("Kernel random number device not found." ++)
 
--- | Seed the OpenSSL PRNG if it isn't already seeded with enough data. Block
--- until it's properly seeded.
+-- | Retained for compatibility: make sure the random device is readable.
+-- There is no user-space PRNG to seed any more.
 seedPRNG :: Handle -> IO ()
-seedPRNG random = untilM_ randStatus (B.hGet random 8 >>= randSeed)
-
-randSeed :: B.ByteString -> IO ()
-randSeed (B.PS ps s l) = withForeignPtr ps $ \p ->
-  c_RAND_seed (p `plusPtr` s) (fromIntegral l)
-
-foreign import ccall unsafe "openssl/rand.h RAND_seed"
-  c_RAND_seed :: Ptr Word8 -> CInt -> IO ()
-
-randStatus :: IO Bool
-randStatus = (1 ==) `fmap` c_RAND_status
-
-foreign import ccall unsafe "openssl/rand.h RAND_status"
-  c_RAND_status :: IO CInt
+seedPRNG random = randBytes random 1 >> return ()

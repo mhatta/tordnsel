@@ -59,7 +59,8 @@ import qualified Control.Exception as E
 import Control.Monad (replicateM_, guard, when)
 import qualified Data.ByteString.Char8 as B
 import qualified Data.Foldable as F
-import Data.List (foldl', unfoldr, mapAccumL)
+import qualified Data.List as L
+import Data.List (unfoldr, mapAccumL)
 import qualified Data.Map as M
 import Data.Map (Map)
 import Data.Maybe (mapMaybe )
@@ -71,7 +72,7 @@ import Data.Time (UTCTime, NominalDiffTime, getCurrentTime, addUTCTime)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import Network.Socket
   ( HostAddress, SockAddr, Family(AF_INET), SocketType(Stream)
-  , socket, connect, sClose, socketToHandle )
+  , socket, connect, socketToHandle )
 import System.IO (hClose, IOMode(ReadWriteMode))
 import System.Timeout
 
@@ -173,7 +174,7 @@ startExitTestInitiator initConf = do
           log Info "Forking exit test clients for router " rid
                    " ports " ports '.'
           newClients <- mapM (forkTestClient conf rid published) ports
-          let newRunningClients = foldl' (flip Set.insert) (runningClients s)
+          let newRunningClients = L.foldl' (flip Set.insert) (runningClients s)
                                          newClients
           log Info "Exit test clients currently running: "
                    (Set.size newRunningClients) '.'
@@ -390,7 +391,7 @@ forkTestClient conf rid published port =
     testHost = B.pack . inet_htoa . eticfTestAddress $ conf
 
     connectToSocksServer =
-      E.bracketOnError (socket AF_INET Stream tcpProtoNum) sClose $ \sock -> do
+      E.bracketOnError (socket AF_INET Stream tcpProtoNum) closeSocket $ \sock -> do
         connect sock (eticfSocksServer conf)
         socketToHandle sock ReadWriteMode
 

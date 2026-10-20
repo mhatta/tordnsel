@@ -26,13 +26,13 @@ import Data.Bits ((.|.), shiftL)
 import qualified Data.ByteString.Char8 as B
 import Data.Dynamic (Typeable)
 import Data.Char (toLower)
-import Data.List (foldl')
+import qualified Data.List as L
 import qualified Data.Map as M
 import Data.Maybe (isNothing, maybeToList, mapMaybe)
 import qualified Data.Set as S
 import Data.Time.Clock.POSIX (POSIXTime, getPOSIXTime)
 import Data.Word (Word8, Word32)
-import Network.Socket (Socket, HostAddress, sClose)
+import Network.Socket (Socket, HostAddress)
 
 import TorDNSEL.Control.Concurrent.Link
 import TorDNSEL.Control.Concurrent.Util
@@ -93,10 +93,11 @@ instance E.Exception DNSMessage
 startDNSServer :: DNSConfig -> IO DNSServer
 startDNSServer initConf = do
   log Info "Starting DNS server."
-  fmap DNSServer . forkLinkIO . E.block . loop $ initConf
+  fmap DNSServer . forkLinkIO $ E.mask $ \restore -> loop restore initConf
   where
-    loop conf = do
-      r <- E.tryJust fromExitSignal . E.unblock $
+    loop :: (forall a. IO a -> IO a) -> DNSConfig -> IO ()
+    loop restore conf = do
+      r <- E.tryJust fromExitSignal . restore $
              runServer (dnsSocket conf) (dnsByteStats conf) (dnsHandler conf)
       case r of
         Left (_,Reconfigure reconf signal) -> do
@@ -104,13 +105,13 @@ startDNSServer initConf = do
           when (conf /= newConf) $
             log Notice "Reconfiguring DNS server."
           when (dnsSocket conf /= dnsSocket newConf) $
-            sClose $ dnsSocket conf
+            closeSocket $ dnsSocket conf
           signal
-          loop newConf
+          loop restore newConf
         Left (_,Terminate reason) -> do
           log Info "Terminating DNS server."
           exit reason
-        Right _ -> loop conf -- impossible
+        Right _ -> loop restore conf -- impossible
 
 -- | Reconfigure the DNS server synchronously with the given function. If the
 -- server exits abnormally before reconfiguring itself, throw its exit signal in
@@ -245,12 +246,12 @@ parseExitListQuery :: [Label] -> Maybe ExitListQuery
 parseExitListQuery labels = do
   (queryType:ip2,port:ip1) <- return . splitAt 5 . map unLabel $ labels
   guard $ length ip1 == 4 && B.map toLower queryType == B.pack "ip-port"
-  liftM3 IPPort (toAddress ip1) (toAddress ip2) (parsePort port)
+  liftM3 IPPort (toAddress ip1) (toAddress ip2) (hush $ parsePort port)
   where
     toAddress xs = do
-      os <- mapM (fmap fromIntegral . readInt) xs
+      os <- mapM (fmap fromIntegral . hush . readInt) xs
       guard $ all (`inBoundsOf` (undefined :: Word8)) os
-      return $! foldl' (.|.) 0 . zipWith shiftL os $ [24,16..]
+      return $! L.foldl' (.|.) 0 . zipWith shiftL os $ [24,16..]
 
 -- | Does a query represent a Tor exit node cabable of exiting to a particular
 -- network service in our current view of the Tor network?

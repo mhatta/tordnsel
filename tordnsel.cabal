@@ -1,102 +1,119 @@
-Name:            TorDNSEL
-Version:         0.1.1-dev
-Synopsis:        provides a DNSBL-style interface for detecting Tor exit nodes
-Description:
+cabal-version:   2.4
+name:            tordnsel
+version:         0.2.0
+synopsis:        provides a DNSBL-style interface for detecting Tor exit nodes
+description:
   TorDNSEL implements a design for a DNSBL-style interface for detecting
   connections exiting the Tor network. This design and its rationale is
-  described at
-  <https://gitweb.torproject.org/tordnsel.git/tree/doc/torel-design.txt>.
-License:         PublicDomain
-License-File:    LICENSE
-Homepage:        http://p56soo2ibjkx23xo.onion/
-Package-URL:     https://archive.torproject.org/tor-package-archive/tordnsel/tordnsel-0.1.1.tar.gz
-Author:          tup
-Maintainer:      tup.tuple@googlemail.com, arlo@torproject.org
-Build-Type:      Simple
-Build-Depends:   array>=0.4, base>=4.5, bytestring>=0.10, containers>=0.5,
-                 deepseq>=1.3, directory>=1.2, time>=1.4, unix>=2.5,
-                 HUnit==1.2.*, binary==0.7.*, conduit==1.1.*,
-                 conduit-extra==1.1.*, mtl==2.1.*, network==2.4.*, stm==2.4.*
-Tested-With:     GHC==7.6
-Data-Files:      config/tordnsel.conf.sample, contrib/cacti-input.pl,
+  described in doc/torel-design.txt.
+license:         NONE
+license-file:    LICENSE
+homepage:        https://github.com/mhatta/tordnsel
+bug-reports:     https://github.com/mhatta/tordnsel/issues
+author:          tup
+maintainer:      Masayuki Hatta <mhatta@mhatta.org>
+copyright:       Public domain
+category:        Network
+build-type:      Simple
+tested-with:     GHC == 9.4.7, GHC == 9.10.3
+extra-doc-files: README, ChangeLog, TODO, doc/torel-design.txt
+data-files:      config/tordnsel.conf.sample, contrib/cacti-input.pl,
                  contrib/tordnsel-init.d-script.sample, doc/tordnsel.8
 
-Executable:      tordnsel
-Main-Is:         tordnsel.hs
-Other-Modules:   TorDNSEL.Config
-                 TorDNSEL.Config.Internals
-                 TorDNSEL.Control.Concurrent.Link
-                 TorDNSEL.Control.Concurrent.Link.Internals
-                 TorDNSEL.Control.Concurrent.Util
-                 TorDNSEL.Directory
-                 TorDNSEL.Directory.Internals
-                 TorDNSEL.DistinctQueue
-                 TorDNSEL.DNS
-                 TorDNSEL.DNS.Internals
-                 TorDNSEL.DNS.Server
-                 TorDNSEL.DNS.Server.Internals
-                 TorDNSEL.Document
-                 TorDNSEL.ExitTest.Initiator
-                 TorDNSEL.ExitTest.Initiator.Internals
-                 TorDNSEL.ExitTest.Request
-                 TorDNSEL.ExitTest.Server
-                 TorDNSEL.ExitTest.Server.Internals
-                 TorDNSEL.Log
-                 TorDNSEL.Log.Internals
-                 TorDNSEL.Main
-                 TorDNSEL.NetworkState
-                 TorDNSEL.NetworkState.Internals
-                 TorDNSEL.NetworkState.Storage
-                 TorDNSEL.NetworkState.Storage.Internals
-                 TorDNSEL.NetworkState.Types
-                 TorDNSEL.Random
-                 TorDNSEL.Socks
-                 TorDNSEL.Socks.Internals
-                 TorDNSEL.Statistics
-                 TorDNSEL.Statistics.Internals
-                 TorDNSEL.TorControl
-                 TorDNSEL.TorControl.Internals
-                 TorDNSEL.Util
-HS-Source-Dirs:  src
-Includes:        sys/types.h, unistd.h, sysexits.h, netinet/in.h, openssl/rand.h
-Extra-Libraries: crypto
-GHC-Options:     -O2 -funbox-strict-fields -fno-warn-unused-do-bind -Wall
-CPP-Options:     -DVERSION="0.1.1-dev"
-Extensions:      FlexibleContexts
-                 FlexibleInstances
-                 TypeSynonymInstances
-                 MultiParamTypeClasses
-                 PatternGuards
-                 BangPatterns
-                 ViewPatterns
-                 ScopedTypeVariables
-                 DeriveDataTypeable
-                 GeneralizedNewtypeDeriving
-                 Rank2Types
-                 StandaloneDeriving
+source-repository head
+  type:     git
+  location: https://github.com/mhatta/tordnsel.git
 
-Executable:      runtests
-Buildable:       True
-Main-Is:         runtests.hs
-Other-Modules:   TorDNSEL.Config.Tests
-                 TorDNSEL.Directory.Tests
-                 TorDNSEL.DNS.Tests
-                 TorDNSEL.DNS.Server.Tests
-                 TorDNSEL.Util
-                 TorDNSEL.Log.Internals
-Extensions:      FlexibleContexts
-                 FlexibleInstances
-                 TypeSynonymInstances
-                 MultiParamTypeClasses
-                 PatternGuards
-                 BangPatterns
-                 ViewPatterns
-                 ScopedTypeVariables
-                 DeriveDataTypeable
-                 GeneralizedNewtypeDeriving
-                 Rank2Types
-                 StandaloneDeriving
-HS-Source-Dirs:  src
-Includes:        netinet/in.h, openssl/rand.h
-Extra-Libraries: crypto
-GHC-Options:     -Wall -fno-warn-missing-signatures
+common shared
+  default-language:   Haskell2010
+  default-extensions: FlexibleContexts
+                      FlexibleInstances
+                      TypeSynonymInstances
+                      MultiParamTypeClasses
+                      PatternGuards
+                      BangPatterns
+                      ViewPatterns
+                      ScopedTypeVariables
+                      DeriveDataTypeable
+                      GeneralizedNewtypeDeriving
+                      RankNTypes
+                      StandaloneDeriving
+  build-depends:      base          >= 4.17 && < 5,
+                      array         >= 0.5  && < 0.6,
+                      binary        >= 0.8  && < 0.9,
+                      bytestring    >= 0.11 && < 0.13,
+                      conduit       >= 1.3  && < 1.4,
+                      conduit-extra >= 1.3  && < 1.4,
+                      containers    >= 0.6  && < 0.8,
+                      deepseq       >= 1.4  && < 1.6,
+                      directory     >= 1.3  && < 1.4,
+                      mtl           >= 2.2  && < 2.4,
+                      network       >= 3.1  && < 3.3,
+                      stm           >= 2.5  && < 2.6,
+                      time          >= 1.9  && < 1.15,
+                      transformers  >= 0.5  && < 0.7,
+                      unix          >= 2.7  && < 2.9
+  ghc-options:        -Wall -Wno-unused-do-bind -Wno-name-shadowing
+                      -Wno-incomplete-uni-patterns -Wno-type-defaults
+                      -Wno-x-partial -Wno-unrecognised-warning-flags
+
+library
+  import:           shared
+  hs-source-dirs:   src
+  ghc-options:      -O2 -funbox-strict-fields
+  cpp-options:      -DVERSION="0.2.0"
+  exposed-modules:  TorDNSEL.Config
+                    TorDNSEL.Config.Internals
+                    TorDNSEL.Control.Concurrent.Future
+                    TorDNSEL.Control.Concurrent.Link
+                    TorDNSEL.Control.Concurrent.Link.Internals
+                    TorDNSEL.Control.Concurrent.Util
+                    TorDNSEL.Directory
+                    TorDNSEL.Directory.Internals
+                    TorDNSEL.DistinctQueue
+                    TorDNSEL.DNS
+                    TorDNSEL.DNS.Internals
+                    TorDNSEL.DNS.Server
+                    TorDNSEL.DNS.Server.Internals
+                    TorDNSEL.Document
+                    TorDNSEL.ExitTest.Initiator
+                    TorDNSEL.ExitTest.Initiator.Internals
+                    TorDNSEL.ExitTest.Request
+                    TorDNSEL.ExitTest.Server
+                    TorDNSEL.ExitTest.Server.Internals
+                    TorDNSEL.Log
+                    TorDNSEL.Log.Internals
+                    TorDNSEL.Main
+                    TorDNSEL.NetworkState
+                    TorDNSEL.NetworkState.Internals
+                    TorDNSEL.NetworkState.Storage
+                    TorDNSEL.NetworkState.Storage.Internals
+                    TorDNSEL.NetworkState.Types
+                    TorDNSEL.Random
+                    TorDNSEL.Socks
+                    TorDNSEL.Socks.Internals
+                    TorDNSEL.Statistics
+                    TorDNSEL.Statistics.Internals
+                    TorDNSEL.TorControl
+                    TorDNSEL.TorControl.Internals
+                    TorDNSEL.Util
+
+executable tordnsel
+  import:           shared
+  main-is:          tordnsel.hs
+  hs-source-dirs:   app
+  build-depends:    tordnsel
+  ghc-options:      -threaded -rtsopts
+
+test-suite runtests
+  import:           shared
+  type:             exitcode-stdio-1.0
+  main-is:          runtests.hs
+  hs-source-dirs:   tests
+  other-modules:    TorDNSEL.Config.Tests
+                    TorDNSEL.Directory.Tests
+                    TorDNSEL.DNS.Tests
+                    TorDNSEL.DNS.Server.Tests
+  build-depends:    tordnsel,
+                    HUnit >= 1.6 && < 1.7
+  ghc-options:      -threaded

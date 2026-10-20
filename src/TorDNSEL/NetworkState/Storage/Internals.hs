@@ -23,7 +23,7 @@ import Control.Arrow (second)
 import Control.Concurrent.Chan (newChan, readChan, writeChan)
 import qualified Control.Exception as E
 import Control.Monad (liftM2, when, forM)
-import Control.Monad.Error (MonadError(throwError))
+import Control.Monad.Except (MonadError(throwError))
 import Control.Monad.Fix (fix)
 import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy.Char8 as L

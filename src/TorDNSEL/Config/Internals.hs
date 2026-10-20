@@ -45,11 +45,10 @@ module TorDNSEL.Config.Internals (
 
 import Prelude hiding (log)
 import Control.Arrow ((***), second)
-import Control.Concurrent.Chan
 import Control.Concurrent.MVar
 import qualified Control.Exception as E
 import Control.Monad (liftM, liftM2, ap, forever)
-import Control.Monad.Error (MonadError(..))
+import Control.Monad.Except (MonadError(..))
 import Control.Monad.Fix (fix)
 import Data.Char (isSpace, toLower)
 import Data.Maybe (catMaybes)
@@ -61,7 +60,7 @@ import qualified Data.Set as S
 import Data.Set (Set)
 import Network.Socket
   ( Socket, HostAddress, SockAddr(SockAddrInet, SockAddrUnix), Family(AF_UNIX)
-  , SocketType(Stream), socket, connect, accept, socketToHandle, sClose )
+  , SocketType(Stream), socket, connect, accept, socketToHandle )
 import System.IO (IOMode(ReadWriteMode), hClose)
 import System.Posix.Files (setOwnerAndGroup)
 import System.Posix.Types (UserID)
@@ -220,7 +219,9 @@ class ConfigValue a where
   parse :: MonadError ShowS m => ByteString -> ConfigMap -> m a
 
 instance ConfigValue a => ConfigValue (Maybe a) where
-  parse = (return .) . parse
+  parse item conf
+    | M.member (B.map toLower item) conf = Just `liftM` parse item conf
+    | otherwise                          = return Nothing
 
 instance ConfigValue ByteString where
   parse = lookupValue
@@ -360,7 +361,7 @@ instance Thread ReconfigServer where
 
 -- | An internal types representing the current reconfigure server state.
 data State = State
-  { reconfigChan  :: !(Chan ReconfigMessage)
+  { reconfigChan  :: !(MsgChan ReconfigMessage)
   , listenSock    :: !Socket
   , sendNewConfig :: !(Config -> (Maybe String -> IO ()) -> IO ())
   , listenerTid   :: !ThreadId }
@@ -378,7 +379,7 @@ reconfigSocketPath = (++ "/reconfigure.socket")
 -- | Connect to the reconfigure socket, given the runtime directory.
 connectToReconfigSocket :: FilePath -> IO Socket
 connectToReconfigSocket runtimeDir =
-  E.bracketOnError (socket AF_UNIX Stream 0) sClose $ \sock -> do
+  E.bracketOnError (socket AF_UNIX Stream 0) closeSocket $ \sock -> do
     connect sock (SockAddrUnix $ reconfigSocketPath runtimeDir)
     return sock
 
@@ -386,7 +387,7 @@ connectToReconfigSocket runtimeDir =
 -- reconfigure socket.
 bindReconfigSocket :: FilePath -> Maybe UserID -> IO Socket
 bindReconfigSocket runtimeDir mbUidOwner =
-  E.bracketOnError (bindListeningUnixDomainStreamSocket sockPath 0o600) sClose $
+  E.bracketOnError (bindListeningUnixDomainStreamSocket sockPath 0o600) closeSocket $
     \sock -> do whenJust mbUidOwner $ \uidOwner ->
                   setOwnerAndGroup sockPath uidOwner (-1)
                 return sock
@@ -423,13 +424,13 @@ startReconfigServer
   :: Socket -> (Config -> (Maybe String -> IO ()) -> IO ()) -> IO ReconfigServer
 startReconfigServer sock sendConfig = do
   log Info "Starting reconfigure server."
-  chan <- newChan
+  chan <- newMsgChan
   tid <- forkLinkIO $ do
-    setTrapExit $ (writeChan chan .) . Exit
-    initListener <- forkListener sock (writeChan chan)
-    fix (\loop (!s) -> readChan chan >>= handleMessage s >>= loop)
+    setTrapExit $ (writeMsgChan chan .) . Exit
+    initListener <- forkListener sock (writeMsgChan chan)
+    fix (\loop (!s) -> readMsgChan chan >>= handleMessage s >>= loop)
         (State chan sock sendConfig initListener)
-  return $ ReconfigServer tid (writeChan chan)
+  return $ ReconfigServer tid (writeMsgChan chan)
 
 handleMessage :: State -> ReconfigMessage -> IO State
 handleMessage s (NewClient client signal) = do
@@ -453,15 +454,15 @@ handleMessage s (NewClient client signal) = do
 handleMessage s (Terminate reason) = do
   log Info "Terminating reconfigure server."
   terminateThread Nothing (listenerTid s) (killThread $ listenerTid s)
-  msgs <- untilM (isEmptyChan $ reconfigChan s) (readChan $ reconfigChan s)
-  sequence_ [sClose client | NewClient client _ <- msgs]
+  msgs <- drainMsgChan $ reconfigChan s
+  sequence_ [closeSocket client | NewClient client _ <- msgs]
   exit reason
 
 handleMessage s (Exit tid reason)
   | tid == listenerTid s = do
       log Warn "The reconfigure listener thread exited unexpectedly: "
                (show reason) "; restarting."
-      newListenerTid <- forkListener (listenSock s) (writeChan $ reconfigChan s)
+      newListenerTid <- forkListener (listenSock s) (writeMsgChan $ reconfigChan s)
       return s { listenerTid = newListenerTid }
   | isAbnormal reason = exit reason
   | otherwise = return s

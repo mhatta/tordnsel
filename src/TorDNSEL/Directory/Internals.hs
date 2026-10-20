@@ -42,32 +42,22 @@ module TorDNSEL.Directory.Internals (
   , RuleType(..)
   , parseExitPolicy
   , exitPolicyAccepts
-
-  -- * Shared values
-  , Hash(..)
-  , lookupSharedValue
   ) where
 
-import Control.Concurrent.MVar (newMVar, withMVar)
-import qualified Control.Exception as E
 import Control.Monad (when, unless, liftM)
-import Control.Monad.Error (MonadError(throwError))
+import Control.Monad.Except (MonadError(throwError))
 import Data.Char
   ( ord, isSpace, isHexDigit, digitToInt, isAscii, isAsciiUpper
   , isAsciiLower, isAlpha, isDigit )
-import qualified Data.HashTable as HT
-import Data.List (foldl')
-import Data.Bits ((.|.), (.&.), shiftL, shiftR, complement, xor)
+import qualified Data.List as L
+import Data.Bits ((.|.), (.&.), shiftL, shiftR)
 import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString as W
 import Data.ByteString (ByteString)
-import Data.Int (Int32)
 import Data.Time (UTCTime)
 import Data.Time.Clock.POSIX
   (POSIXTime, utcTimeToPOSIXSeconds, posixSecondsToUTCTime)
 import Network.Socket (HostAddress)
-import System.IO.Unsafe (unsafePerformIO)
-import System.Mem.Weak (mkWeakPtr, deRefWeak, finalize)
 
 import TorDNSEL.Document
 import TorDNSEL.Util
@@ -89,7 +79,7 @@ data Descriptor = Desc
 instance Show Descriptor where
   showsPrec _ d = cat (descRouterID d) ' ' (inet_htoa $ descListenAddr d) ' '
     (posixSecondsToUTCTime $ descPublished d) '\n'
-    (foldl' (.) id (map (\p -> shows p . ('\n' :)) (descExitPolicy d)))
+    (L.foldl' (.) id (map (\p -> shows p . ('\n' :)) (descExitPolicy d)))
 
 -- | Parse a router descriptor. Return the result or 'throwError' in the monad
 -- if the format is invalid.
@@ -137,7 +127,7 @@ parseRouterStatus :: MonadError ShowS m => Document -> m RouterStatus
 parseRouterStatus items = do
   (rid,published) <- prependError ("Failed parsing router status entry: " ++)
                                   (parseRouter =<< findArg (B.pack "r") items)
-  return $! RS rid published (parseStatus $ findArg (B.pack "s") items)
+  return $! RS rid published (parseStatus . hush $ findArg (B.pack "s") items)
   where
     parseRouter router
       | _:base64RouterID:_:date:time:_ <- B.splitWith isSpace router = do
@@ -166,10 +156,6 @@ newtype RouterID = RtrId { unRtrId :: ByteString }
 instance Show RouterID where
   show = B.unpack . encodeBase16RouterID
 
-instance Hash RouterID where
-  hash = foldl' (flip $ xor . chunk) 0 . split 4 . unRtrId
-    where chunk x = foldl' (flip $ (.|.) . fromIntegral . W.index x) 0 [0..3]
-
 -- | Decode a 'RouterID' encoded in base16. Return the result or 'throwError' in
 -- the monad if the format is invalid.
 decodeBase16RouterID :: MonadError ShowS m => ByteString -> m RouterID
@@ -197,7 +183,7 @@ decodeBase64RouterID bs = do
     toBytes = W.pack . concatMap (indicesToBytes . map base64Index . B.unpack)
 
     indicesToBytes is = map (fromIntegral . (0xff .&.) . shiftR buf) [16,8,0]
-      where buf = foldl' (.|.) 0 $ zipWith shiftL is [18,12..]
+      where buf = L.foldl' (.|.) 0 $ zipWith shiftL is [18,12..]
 
     base64Index x
       | isAsciiUpper x = ord x - 65
@@ -219,9 +205,6 @@ encodeBase16RouterID = encodeBase16 . unRtrId
 -- | An exit policy consisting of a sequence of rules.
 type ExitPolicy = [Rule]
 
-instance Hash ExitPolicy where
-  hash = fromIntegral . foldl' (flip $ (+) . hash) 0
-
 -- | An exit policy rule consisting of a 'RuleType' and an address\/mask and
 -- port range pattern.
 data Rule = Rule
@@ -241,11 +224,6 @@ instance Show Rule where
   showsPrec _ p = cat (ruleType p) ' ' (inet_htoa $ ruleAddress p) '/'
     (inet_htoa $ ruleMask p) ':' (ruleBeginPort p) '-' (ruleEndPort p)
 
-instance Hash Rule where
-  hash (Rule typ addr mask begin end) =
-    fromIntegral . (if typ == Reject then complement else id) $
-      addr + mask + fromIntegral begin `shiftL` 8 + fromIntegral end `shiftL` 16
-
 -- | Whether a rule allows an exit connection.
 data RuleType
   = Accept -- ^ The rule accepts connections.
@@ -257,7 +235,7 @@ data RuleType
 parseExitPolicy :: MonadError ShowS m => [Item] -> m ExitPolicy
 parseExitPolicy xs = do
   policy <- mapM (prependError ("Failed parsing exit rule: " ++) . parseRule) xs
-  return $! lookupSharedValue policy
+  return $! policy
   where
     parseRule (Item key (Just arg) _)
       | [addrSpec,portSpec] <- B.split ':' arg = do
@@ -268,8 +246,7 @@ parseExitPolicy xs = do
         (beginPort,endPort) <- prependError
           (cat "Malformed port specifier " (esc maxPortLen portSpec) ": ")
           (parsePortSpec portSpec)
-        return $! lookupSharedValue $
-          Rule ruleType' address mask beginPort endPort
+        return $! Rule ruleType' address mask beginPort endPort
     parseRule (Item key arg _) =
       throwError $ cat "Malformed exit rule " (esc maxRuleTypeLen key) ' '
                        (maybe id (esc maxRuleLen) arg) '.'
@@ -284,7 +261,8 @@ parseExitPolicy xs = do
       | bs == (B.pack "*") = return (0, 0)
       | [addr,mask] <- B.split '/' bs = do
         addr' <- inet_atoh addr
-        mask' <- maybe (bitsToMask =<< readInt mask) return (inet_atoh mask)
+        mask' <- either (const $ bitsToMask =<< readInt mask) return
+                        (inet_atoh mask)
         return (addr' .&. mask', mask')
       | otherwise = do
         addr <- inet_atoh bs
@@ -292,8 +270,9 @@ parseExitPolicy xs = do
 
     parsePortSpec bs
       | bs == (B.pack "*") = return (0, 65535)
-      | ports@[_,_] <- B.split '-' bs = do
-        [begin,end] <- mapM parsePort ports
+      | [b,e] <- B.split '-' bs = do
+        begin <- parsePort b
+        end   <- parsePort e
         when (begin > end) $
           throwError $ cat "Begin port is greater then end port."
         return (begin, end)
@@ -322,39 +301,3 @@ exitPolicyAccepts addr port exitPolicy
     matchingRules = map ruleType . filter matches $ exitPolicy
     matches r = addr .&. ruleMask r == ruleAddress r &&
                 ruleBeginPort r <= port && port <= ruleEndPort r
---------------------------------------------------------------------------------
--- Shared values
-
--- | A type that can be hashed for storage in a 'HashTable'.
-class Hash a where
-  hash :: a -> Int32 -- ^ A hash function.
-
--- | Look up a value in a table of shared values. If the value is present,
--- return the shared value from the table. Otherwise, insert the given value
--- into the table and return it. The idea here is to save memory by storing
--- only one copy of equivalent values. This function is only referentially
--- transparent when the 'Eq' instance implements structural equality.
-lookupSharedValue :: (Hash a, Eq a) => a -> a
-{-# NOINLINE lookupSharedValue #-}
-lookupSharedValue = unsafePerformIO . E.block $ do
-  -- These will be run only once in each specialized version of this function.
-  lock <- newMVar ()
-  -- A hash table containing weak pointers to shared values. When a shared value
-  -- becomes unreachable, a finalizer removes it from the table.
-  table <- HT.new (==) hash
-  return $ \value -> unsafePerformIO . E.block . withMVar lock . const $ do
-    mbValuePtr <- HT.lookup table value
-    case mbValuePtr of
-      Nothing -> insert table value
-      Just valuePtr -> do
-        mbSharedValue <- deRefWeak valuePtr
-        case mbSharedValue of
-          Nothing -> do
-            finalize valuePtr
-            insert table value
-          Just sharedValue -> return sharedValue
-  where
-    insert table value = do
-      let finalizer = HT.delete table value
-      mkWeakPtr value (Just finalizer) >>= HT.insert table value
-      return value

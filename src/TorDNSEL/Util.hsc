@@ -1,4 +1,4 @@
-{-# LANGUAGE ForeignFunctionInterface, OverlappingInstances, UndecidableInstances #-}
+{-# LANGUAGE ForeignFunctionInterface, UndecidableInstances #-}
 {-# OPTIONS_GHC -fno-warn-type-defaults -fno-warn-orphans #-}
 
 -----------------------------------------------------------------------------
@@ -70,12 +70,14 @@ module TorDNSEL.Util (
   , c_lines_any
 
   -- * Network functions
+  , closeSocket
   , bindUDPSocket
   , bindListeningTCPSocket
   , bindListeningUnixDomainStreamSocket
 
   -- * Monads
   , MaybeT(..)
+  , hush
 
   -- * Address
   , Address(..)
@@ -107,17 +109,17 @@ module TorDNSEL.Util (
   ) where
 
 import Control.Arrow ((&&&), first, second)
-import Control.Applicative
 import Control.Monad
 import qualified Control.Exception as E
-import Control.Monad.Error (Error(..), MonadError(..), MonadTrans(..), MonadIO(..))
+import Control.Monad.Except (MonadError(..))
+import Control.Monad.Trans.Maybe (MaybeT(..))
 import qualified Control.Monad.State as State
 import Control.Monad.State (MonadState)
 import Data.Bits ((.&.), (.|.), shiftL, shiftR)
 import Data.Char
   (intToDigit, showLitChar, isPrint, isControl, chr, ord, digitToInt, isAscii)
-import Data.List (foldl', intersperse)
-import Data.Monoid
+import qualified Data.List as L
+import Data.List (intersperse)
 import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Internal as B (c2w)
@@ -129,9 +131,9 @@ import Data.Time
   , timeOfDayToTime, timeToTimeOfDay )
 import Data.Word (Word16, Word32)
 import Network.Socket
-  ( HostAddress, ProtocolNumber, Socket, SockAddr(..), SocketOption(ReuseAddr)
-  , SocketType(Datagram, Stream), Family(AF_INET, AF_UNIX), socket, bindSocket
-  , listen, setSocketOption, sClose, sOMAXCONN )
+  ( HostAddress, ProtocolNumber, Socket, SockAddr(..), SocketOption(ReuseAddr, IPv6Only)
+  , SocketType(Datagram, Stream), Family(AF_INET, AF_INET6, AF_UNIX), socket, bind
+  , listen, setSocketOption, close, maxListenQueue )
 import System.Directory (doesFileExist, removeFile)
 import System.Environment (getProgName)
 import System.Exit (exitWith, ExitCode)
@@ -141,7 +143,7 @@ import System.Posix.Types (FileMode)
 import Text.Printf (printf)
 import Data.Binary (Binary(..))
 
-import           Data.Conduit.Internal (Conduit, Sink)
+import           Data.Conduit (ConduitT)
 import qualified Data.Conduit as C
 import qualified Data.Conduit.List as CL
 import qualified Data.Conduit.Binary as CB
@@ -171,9 +173,9 @@ readInteger bs = case B.readInteger bs of
 -- result or 'throwError' in the monad if the format is invalid.
 inet_atoh :: MonadError ShowS m => ByteString -> m HostAddress
 inet_atoh bs
-  | Just os@[_,_,_,_] <- mapM readInt $ B.split '.' bs
+  | Right os@[_,_,_,_] <- mapM readInt $ B.split '.' bs
   , all (\o -> o .&. 0xff == o) os
-  = return . foldl' (.|.) 0 . zipWith shiftL (map fromIntegral os) $ [24,16..]
+  = return . L.foldl' (.|.) 0 . zipWith shiftL (map fromIntegral os) $ [24,16..]
 inet_atoh bs = throwError $ cat "Malformed IP address " (esc maxAddrLen bs) '.'
   where maxAddrLen = 15
 
@@ -188,8 +190,8 @@ parseLocalTime :: MonadError ShowS m => ByteString -> m LocalTime
 parseLocalTime bs
   | B.length bs == timeLen, [date,time] <- B.split ' ' bs
   = prependError (cat "Malformed time " (esc timeLen bs) ": ") $ do
-      [year,month,day]  <- mapM readInt $ B.split '-' date
-      [hour,minute,sec] <- mapM readInt $ B.split ':' time
+      (year,month,day)  <- triple =<< mapM readInt (B.split '-' date)
+      (hour,minute,sec) <- triple =<< mapM readInt (B.split ':' time)
       when (month < 1 || month > 12 || day < 1 || day > 31 || hour < 0 ||
             hour > 24 || minute < 0 || minute > 59 || sec < 0 || sec > 61) $
         throwError $ cat "Failed sanity check."
@@ -198,6 +200,8 @@ parseLocalTime bs
                           (timeToTimeOfDay diff)
   | otherwise = throwError $ cat "Malformed time " (esc timeLen bs) '.'
   where timeLen = 19
+        triple [x,y,z] = return (x, y, z)
+        triple _       = throwError ("Wrong number of fields." ++)
 
 -- | Parse a quoted string with C-style escape sequences. Also return the
 -- remainder of the input string. 'throwError' in the monad if parsing fails.
@@ -404,15 +408,9 @@ x `inBoundsOf` y = x >= fromIntegral (minBound `asTypeOf` y) &&
 instance Show ShowS where
   showsPrec _ s = shows (s "")
 
-instance Error ShowS where
-  noMsg = id
-  strMsg = (++)
-
-instance Error e => MonadError e Maybe where
-  throwError = const Nothing
-  catchError m f = case m of
-    Nothing -> f noMsg
-    other   -> other
+-- | Discard the error message of a failed computation.
+hush :: Either e a -> Maybe a
+hush = either (const Nothing) Just
 
 foreign import ccall unsafe "htonl" htonl :: Word32 -> Word32
 foreign import ccall unsafe "ntohl" ntohl :: Word32 -> Word32
@@ -433,14 +431,14 @@ showUTCTime time = printf "%s %02d:%02d:%s" date hours mins secStr'
 -- Conduit utilities
 
 -- | 'CB.take' for strict 'ByteString's.
-c_take :: Monad m => Int -> Sink ByteString m ByteString
+c_take :: Monad m => Int -> ConduitT ByteString o m ByteString
 c_take = fmap (mconcat . BL.toChunks) . CB.take
 
 -- | Read until the delimiter and return the parts before and after, not
 -- including delimiter.
 c_breakDelim :: Monad m
              => ByteString
-             -> Sink ByteString m (Maybe (ByteString, ByteString))
+             -> ConduitT ByteString o m (Maybe (ByteString, ByteString))
 c_breakDelim delim = wait_input $ B.empty
   where
     wait_input front = C.await >>=
@@ -457,14 +455,14 @@ c_breakDelim delim = wait_input $ B.empty
     d_len = B.length delim
 
 -- | Take a CRLF-delimited line from the input.
-c_line_crlf :: Monad m => Sink ByteString m ByteString
+c_line_crlf :: Monad m => ConduitT ByteString o m ByteString
 c_line_crlf =
   c_breakDelim (B.pack "\r\n") >>=
     return B.empty `maybe` \(line, rest) -> line <$ C.leftover rest
 
 -- | Stream lines delimited by either LF or CRLF.
-c_lines_any :: Monad m => Conduit ByteString m ByteString
-c_lines_any = CB.lines C.=$= CL.map strip
+c_lines_any :: Monad m => ConduitT ByteString ByteString m ()
+c_lines_any = CB.lines C..| CL.map strip
   where
     strip bs = case unsnoc bs of
         Just (bs', '\r') -> bs'
@@ -473,23 +471,31 @@ c_lines_any = CB.lines C.=$= CL.map strip
 --------------------------------------------------------------------------------
 -- Network functions
 
+-- | Close a socket. (Called @sClose@ in network < 2.4.)
+closeSocket :: Socket -> IO ()
+closeSocket = close
+
 -- | Open a new UDP socket and bind it to the given 'SockAddr'.
 bindUDPSocket :: SockAddr -> IO Socket
 bindUDPSocket sockAddr =
-  E.bracketOnError (socket AF_INET Datagram udpProtoNum) sClose $ \sock -> do
-    setSocketOption sock ReuseAddr 1
-    bindSocket sock sockAddr
-    return sock
+  E.bracketOnError (socket (sockAddrFamily sockAddr) Datagram udpProtoNum) close $
+    \sock -> do
+      setSocketOption sock ReuseAddr 1
+      setV6Only sockAddr sock
+      bind sock sockAddr
+      return sock
 
 -- | Open a new TCP socket, bind it to the given 'SockAddr', then pass it to
 -- 'listen'.
 bindListeningTCPSocket :: SockAddr -> IO Socket
 bindListeningTCPSocket sockAddr = do
-  E.bracketOnError (socket AF_INET Stream tcpProtoNum) sClose $ \sock -> do
-    setSocketOption sock ReuseAddr 1
-    bindSocket sock sockAddr
-    listen sock sOMAXCONN
-    return sock
+  E.bracketOnError (socket (sockAddrFamily sockAddr) Stream tcpProtoNum) close $
+    \sock -> do
+      setSocketOption sock ReuseAddr 1
+      setV6Only sockAddr sock
+      bind sock sockAddr
+      listen sock maxListenQueue
+      return sock
 
 -- | Open a listening Unix domain stream socket at @sockPath@, unlinking it
 -- first if it exists, then setting it to the given mode.
@@ -498,41 +504,23 @@ bindListeningUnixDomainStreamSocket sockPath mode = do
   sockExists <- doesFileExist sockPath
   when sockExists $
     removeFile sockPath
-  E.bracketOnError (socket AF_UNIX Stream 0) sClose $ \sock -> do
-    setSocketOption sock ReuseAddr 1
-    bindSocket sock $ SockAddrUnix sockPath
+  E.bracketOnError (socket AF_UNIX Stream 0) close $ \sock -> do
+    bind sock $ SockAddrUnix sockPath
     setFileMode sockPath mode
-    listen sock sOMAXCONN
+    listen sock maxListenQueue
     return sock
 
---------------------------------------------------------------------------------
--- Monads
+-- | The address family of a 'SockAddr'.
+sockAddrFamily :: SockAddr -> Family
+sockAddrFamily SockAddrInet{}  = AF_INET
+sockAddrFamily SockAddrInet6{} = AF_INET6
+sockAddrFamily SockAddrUnix{}  = AF_UNIX
 
--- | The transformer version of 'Maybe'.
-newtype MaybeT m a = MaybeT { runMaybeT :: m (Maybe a) }
-
-instance Functor f => Functor (MaybeT f) where
-  f `fmap` MaybeT m = MaybeT $ fmap f `fmap` m
-
-instance Monad m => Monad (MaybeT m) where
-  return = MaybeT . return . Just
-  MaybeT m >>= f = MaybeT $ m >>= maybe (return Nothing) (runMaybeT . f)
-  fail = const . MaybeT $ return Nothing
-
-instance MonadTrans MaybeT where
-  lift = MaybeT . liftM Just
-
-instance MonadIO m => MonadIO (MaybeT m) where
-  liftIO io = lift $ liftIO io
-
-instance Monad m => MonadPlus (MaybeT m) where
-  mzero = MaybeT $ return Nothing
-  MaybeT m1 `mplus` MaybeT m2 = MaybeT $ m1 >>= maybe m2 (return . Just)
-
-instance Monad m => MonadError ShowS (MaybeT m) where
-  throwError = const . MaybeT $ return Nothing
-  MaybeT m `catchError` f =
-    MaybeT $ m >>= maybe (runMaybeT $ f noMsg) (return . Just)
+-- | Restrict IPv6 sockets to IPv6 traffic so that an IPv4 and an IPv6
+-- listener can be bound to the same port.
+setV6Only :: SockAddr -> Socket -> IO ()
+setV6Only SockAddrInet6{} sock = setSocketOption sock IPv6Only 1
+setV6Only _ _ = return ()
 
 --------------------------------------------------------------------------------
 -- Addresses
@@ -552,7 +540,7 @@ showAddress (Addr addr)     = addr
 -- | Parse an 'Address'.
 readAddress :: ByteString -> Address
 readAddress bs
-  | Just addr <- inet_atoh bs = IPv4Addr addr
+  | Right addr <- inet_atoh bs = IPv4Addr addr
   | otherwise                 = Addr bs
 
 --------------------------------------------------------------------------------
@@ -598,7 +586,7 @@ escape = uncurry Escaped . (B.concat . build &&& B.length)
       | B.null unescd = [escd]
       | otherwise     = escd : escape' unescd : build rest
       where (escd,(unescd,rest)) = B.span isControl `second` B.span isPrint bs
-    escape' = B.pack . flip (foldl' (.) id) "" . map showLitChar . B.unpack
+    escape' = B.pack . flip (L.foldl' (.) id) "" . map showLitChar . B.unpack
 
 -- | Quote an 'EscapedString', truncating it if its escaped length exceeds
 -- @maxLen@. When truncated, append a \"[truncated, n total bytes]\" message
@@ -629,19 +617,19 @@ class CatArg a where
   -- | Convert a 'CatArg' to a string for constant-time concatenation.
   showsCatArg :: a -> ShowS
 
-instance CatArg String where
+instance {-# OVERLAPPING #-} CatArg String where
   showsCatArg = (++)
 
-instance CatArg ShowS where
+instance {-# OVERLAPPING #-} CatArg ShowS where
   showsCatArg = id
 
-instance CatArg Char where
+instance {-# OVERLAPPING #-} CatArg Char where
   showsCatArg = (:)
 
-instance CatArg ByteString where
+instance {-# OVERLAPPING #-} CatArg ByteString where
   showsCatArg = (++) . B.unpack
 
-instance Show a => CatArg a where
+instance {-# OVERLAPPABLE #-} Show a => CatArg a where
   showsCatArg = shows
 
 -- | Implements the variable parameter support for 'cat'.
@@ -654,13 +642,13 @@ instance CatType (IO a) where
 instance CatType String where
   cat' str arg = cat' str arg ""
 
-instance CatType ShowS where
+instance {-# OVERLAPPING #-} CatType ShowS where
   cat' str arg = str . showsCatArg arg
 
 instance CatType ByteString where
   cat' str arg = B.pack (cat' str arg)
 
-instance (CatArg a, CatType r) => CatType (a -> r) where
+instance {-# OVERLAPPABLE #-} (CatArg a, CatType r) => CatType (a -> r) where
   cat' str arg = cat' (cat' str arg)
 
 -- | Concatentate a variable number of parameters that can be converted to

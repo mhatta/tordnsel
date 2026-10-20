@@ -131,9 +131,9 @@ startStatsServer listenSock = do
 -- | Fork the listener thread.
 forkListener :: Chan StatsMessage -> Socket -> QSem -> IO ThreadId
 forkListener statsChan listenSock sem =
-  forkLinkIO . E.block . forever $ do
+  forkLinkIO $ E.mask $ \restore -> forever $ do
     waitQSem sem
-    (client,_) <- E.unblock $ accept listenSock
+    (client,_) <- restore $ accept listenSock
       `E.onException` signalQSem sem
     writeChan statsChan $ NewClient client
 

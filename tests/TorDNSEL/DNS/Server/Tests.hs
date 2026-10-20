@@ -33,6 +33,6 @@ tests = TestList . map TestCase $
     toLabels = map $ Label
     toName = DomainName . toLabels
     query' = do
-      qAddr <- inet_atoh "10.0.0.1"
-      dAddr <- inet_atoh "1.2.3.4"
+      qAddr <- hush $ inet_atoh "10.0.0.1"
+      dAddr <- hush $ inet_atoh "1.2.3.4"
       return $ IPPort { queryAddr = qAddr, destAddr = dAddr, destPort = 80 }

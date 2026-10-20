@@ -138,7 +138,7 @@ import Control.Concurrent.MVar
   (MVar, newMVar, newEmptyMVar, takeMVar, tryPutMVar, withMVar, modifyMVar_)
 import qualified Control.Exception as E
 import Control.Monad (when, unless, liftM, mzero, mplus)
-import Control.Monad.Error (MonadError(..))
+import Control.Monad.Except (MonadError(..))
 import Control.Monad.Fix (fix)
 import Control.Monad.State (StateT(StateT), get, put, lift, evalStateT)
 import qualified Data.ByteString.Char8 as B
@@ -828,13 +828,13 @@ startIOManager handle = do
 -- @sendRepliesToIOManager@, linking it to the calling thread.
 startSocketReader :: Handle -> ([Reply] -> IO ()) -> IO ThreadId
 startSocketReader handle sendRepliesToIOManager =
-  forkLinkIO $ CB.sourceHandle handle $=
-               c_replies              $$
-               CL.mapM_ sendRepliesToIOManager
+  forkLinkIO . runConduit $ CB.sourceHandle handle
+                         .| c_replies
+                         .| CL.mapM_ sendRepliesToIOManager
 
 -- | Stream decoded 'Reply' groups.
-c_replies :: Conduit B.ByteString IO [Reply]
-c_replies = c_lines_any =$= line0 []
+c_replies :: ConduitT B.ByteString [Reply] IO ()
+c_replies = c_lines_any .| line0 []
   where
 
     line0 acc = await >>= return () `maybe` \line -> do
@@ -982,7 +982,7 @@ parseCircuitStatus line
   | otherwise = throwError $ cat "Malformed circuit status "
                                  (esc maxStatusLen line) '.'
   where
-    parsePath = mapM (decodeBase16RouterID . B.take 40 . B.drop 1) . B.split ','
+    parsePath = hush . mapM (decodeBase16RouterID . B.take 40 . B.drop 1) . B.split ','
     maxStatusLen = 512
 
 -- | A circuit's current state.

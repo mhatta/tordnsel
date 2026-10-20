@@ -13,8 +13,9 @@
 module TorDNSEL.Control.Concurrent.Util where
 
 import qualified Control.Exception as E
-import Data.Functor ( (<$) )
 import Control.Concurrent.MVar (MVar, newEmptyMVar, takeMVar, putMVar, tryPutMVar)
+import Control.Concurrent.STM
+  (TChan, atomically, newTChanIO, writeTChan, readTChan, tryReadTChan)
 import Data.Maybe (isJust)
 import System.Timeout
 
@@ -40,9 +41,11 @@ terminateThread mbWait tid terminate = do
       Nothing -> takeMVar dead
       Just wait -> do
         r <- timeout wait (takeMVar dead)
-        if isJust r then return () else do
-        killThread tid
-        takeMVar dead
+        if isJust r
+          then return ()
+          else do
+            killThread tid
+            takeMVar dead
 
 -- | Send a message to @tid@ by invoking @sendMsg@ with a synchronizing action.
 -- If the thread exits abnormally before synchronizing, throw its exit signal in
@@ -97,11 +100,32 @@ tryForkLinkIO io = do
     io >>= tryPutMVar_ resp . Right
   r <- withMonitor intermediate (tryPutMVar_ resp . Left) $ do
     putMVar sync ()
-    E.block $ do
+    E.mask_ $ do
       r <- takeMVar resp
       either (const $ return ()) (linkThread . threadId) r
       return r
   return (r, intermediate)
+
+--------------------------------------------------------------------------------
+-- Drainable message channels
+
+-- | An unbounded FIFO channel whose pending messages can be drained without
+-- blocking. ('Control.Concurrent.Chan.isEmptyChan' was removed from base.)
+type MsgChan a = TChan a
+
+newMsgChan :: IO (MsgChan a)
+newMsgChan = newTChanIO
+
+writeMsgChan :: MsgChan a -> a -> IO ()
+writeMsgChan c = atomically . writeTChan c
+
+readMsgChan :: MsgChan a -> IO a
+readMsgChan = atomically . readTChan
+
+-- | Remove and return every message currently queued, without blocking.
+drainMsgChan :: MsgChan a -> IO [a]
+drainMsgChan c = atomically (go [])
+  where go acc = tryReadTChan c >>= maybe (return $ reverse acc) (go . (:acc))
 
 tryPutMVar_ :: MVar a -> a -> IO ()
 tryPutMVar_ = ((() <$) .) . tryPutMVar

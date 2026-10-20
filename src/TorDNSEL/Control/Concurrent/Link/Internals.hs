@@ -32,7 +32,6 @@ import Control.Concurrent.MVar
 import GHC.Conc (setUncaughtExceptionHandler)
 import System.Exit (ExitCode)
 import Control.Monad (unless)
-import Data.Functor
 import qualified Data.Foldable as F
 import qualified Data.Map as M
 import qualified Data.Set as S

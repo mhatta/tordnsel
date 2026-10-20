@@ -1,4 +1,4 @@
-{-# LANGUAGE ForeignFunctionInterface, OverlappingInstances #-}
+{-# LANGUAGE ForeignFunctionInterface #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -30,7 +30,7 @@ import Control.Monad.Fix (fix)
 import Control.Monad.Trans (MonadIO, liftIO)
 import Data.Bits ((.|.))
 import qualified Data.ByteString.Char8 as B
-import Data.List (foldl')
+import qualified Data.List as L
 import Data.Time (UTCTime, getCurrentTime)
 import Foreign.C (CString, CInt(..), withCString)
 import System.IO
@@ -133,7 +133,7 @@ startLogger initConf =
 class LogType r where
   log' :: CatArg a => ShowS -> Severity -> a -> r
 
-instance MonadIO m => LogType (m a) where
+instance {-# OVERLAPPABLE #-} MonadIO m => LogType (m a) where
   log' str sev arg = liftIO $ do
     now <- getCurrentTime
     mbLogger <- readMVar logger
@@ -147,10 +147,10 @@ instance MonadIO m => LogType (m a) where
         | otherwise -> return ()
     return undefined -- to omit type annotations in do blocks
 
-instance LogType (Severity, ShowS) where
+instance {-# OVERLAPPING #-} LogType (Severity, ShowS) where
   log' str sev arg = (sev, cat' str arg)
 
-instance (CatArg a, LogType r) => LogType (a -> r) where
+instance {-# OVERLAPPING #-} (CatArg a, LogType r) => LogType (a -> r) where
   log' str sev arg = log' (cat' str arg) sev
 
 -- | Log a message asynchronously.
@@ -194,7 +194,7 @@ openSystemLogger identifier options facility =
   withCString identifier $ \c_identifier ->
     c_openlog c_identifier c_options c_facility
  where
-   c_options = foldl' (.|.) 0
+   c_options = L.foldl' (.|.) 0
     [ x | (flag,x) <- [(noDelay, #{const LOG_NDELAY})
                       ,(logPid,  #{const LOG_PID})]
         , flag options ]

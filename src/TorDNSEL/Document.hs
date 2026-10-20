@@ -27,7 +27,7 @@ module TorDNSEL.Document (
   ) where
 
 import Control.Arrow (first, (***))
-import Control.Monad.Error (MonadError(throwError))
+import Control.Monad.Except (MonadError(throwError))
 import Data.Char (isSpace)
 import qualified Data.ByteString.Char8 as B
 import Data.ByteString (ByteString)

@@ -49,7 +49,8 @@ import System.IO (Handle, BufferMode(NoBuffering), hClose, hSetBuffering)
 import Control.DeepSeq
 
 import Data.Binary (Binary(..), getWord8, putWord8)
-import Data.Binary.Get (runGet)
+import Data.Binary.Get (runGetOrFail, getWord32be)
+import Control.Monad (when)
 import Data.Binary.Put (runPut, putWord32be, putByteString)
 
 import TorDNSEL.Util
@@ -96,6 +97,7 @@ data Response = Response
   }
 
 instance NFData Response where
+  rnf = rwhnf
 
 -- | A Socks4 result code.
 data Result
@@ -145,20 +147,22 @@ encodeRequest = B.concat . L.toChunks . runPut . putRequest
 -- `cereal`. ( See `DNS`. )
 decodeResponse :: ByteString -> IO (Maybe Response)
 decodeResponse resp =
-  ( E.evaluate $ Just $!! runGet getResponse (L.fromChunks [resp]) )
-    `E.catch` \(E.ErrorCall _) -> return Nothing
+  case runGetOrFail getResponse (L.fromChunks [resp]) of
+    Right (_, _, r) -> (Just $!! r) `seq` return (Just r)
+    Left _          -> return Nothing
   where
     getResponse = do
-      0 <- getWord8
+      v <- getWord8
+      when (v /= 0) $ fail "unexpected socks4 response version"
       cd <- getWord8
-      let res = case cd of
-            90 -> Granted
-            91 -> Failed
-            92 -> IdentdUnreachable
-            93 -> IdentdMismatch
-            _  -> error "unknown socks4 result code"
+      res <- case cd of
+            90 -> return Granted
+            91 -> return Failed
+            92 -> return IdentdUnreachable
+            93 -> return IdentdMismatch
+            _  -> fail "unknown socks4 result code"
       port <- get
-      addr <- get
+      addr <- getWord32be
       return $! Response res addr port
 
 --------------------------------------------------------------------------------
