@@ -13,7 +13,7 @@
 -- Parsing the document meta-format used by the Tor directory protocol,
 -- version 2.
 --
--- See <https://www.torproject.org/svn/trunk/doc/spec/dir-spec-v2.txt> for details.
+-- See <https://spec.torproject.org/dir-spec/> for details.
 --
 -----------------------------------------------------------------------------
 

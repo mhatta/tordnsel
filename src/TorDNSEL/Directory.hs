@@ -12,7 +12,7 @@
 -- status entries from the Tor directory protocol, version 2. We only
 -- parse information necessary for running the exit list server.
 --
--- See <https://www.torproject.org/svn/trunk/doc/spec/dir-spec-v2.txt> for details.
+-- See <https://spec.torproject.org/dir-spec/> for details.
 --
 -----------------------------------------------------------------------------
 
