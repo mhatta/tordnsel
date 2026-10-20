@@ -42,6 +42,8 @@ module TorDNSEL.Main (
   , reconfigureOrRestartLogger
   , reconfigureListenersAndNetworkStateManager
   , reconfigureDNSListenerAndServer
+  , reconfigureHTTPListenerAndServer
+  , mkWebConfig
   , terminateProcess
 
   -- * Daemon operations
@@ -81,13 +83,13 @@ import qualified Data.Set as S
 import Data.Set (Set)
 import System.Environment (getArgs)
 import System.IO
-  ( openFile, hPutStrLn, hFlush, hClose, Handle, stdout, stderr
-  , IOMode(WriteMode, ReadWriteMode, AppendMode) )
+  ( openFile, hPutStrLn, hClose, Handle, stdout, stderr
+  , IOMode(WriteMode, AppendMode) )
 import System.IO.Error (isPermissionError)
 import Network.Socket
-  ( Socket, SockAddr(SockAddrInet), shutdown, ShutdownCmd(ShutdownSend)
-  , socketToHandle )
+  (Socket, SockAddr(SockAddrInet), shutdown, ShutdownCmd(ShutdownSend))
 
+import qualified Network.Socket.ByteString as NSB
 import System.Exit (ExitCode(ExitSuccess, ExitFailure), exitWith)
 import System.Directory (setCurrentDirectory, createDirectoryIfMissing)
 import System.Posix.IO
@@ -121,6 +123,7 @@ import TorDNSEL.NetworkState
 import TorDNSEL.Random
 import TorDNSEL.Statistics
 import TorDNSEL.Util
+import TorDNSEL.Web
 
 #include <sys/types.h>
 #include <unistd.h>
@@ -168,6 +171,10 @@ data State = State
   , exitTestListeners   :: Map SockAddr (Maybe Socket)
                             -- ^ Listening exit test sockets.
   , dnsListener         :: Socket -- ^ The listening DNS socket.
+  , webServer           :: Maybe WebServer
+                            -- ^ The web interface thread, if enabled.
+  , httpListener        :: Maybe Socket
+                            -- ^ The listening HTTP socket, if enabled.
   , deadThreads         :: Set ThreadId
                             -- ^ Dead threads linked to the main thread.
   }
@@ -204,11 +211,16 @@ main = do
       r <- E.handle (\(e :: E.IOException) -> do
              hCat stderr "An I/O error occurred while reconfiguring: " e '\n'
              exitWith $ fromSysExitCode IOError) $
-        E.bracket (socketToHandle sock ReadWriteMode) hClose $ \handle -> do
-          L.getContents >>= L.hPut handle
-          hFlush handle
+        (`E.finally` closeSocket sock) $ do
+          -- network >= 3 invalidates a socket handed to socketToHandle, so
+          -- talk to the socket directly to be able to half-close it.
+          L.getContents >>= NSB.sendAll sock . B.concat . L.toChunks
           shutdown sock ShutdownSend
-          B.hGetContents handle
+          let readAll acc = do
+                chunk <- NSB.recv sock 4096
+                if B.null chunk then return (B.concat $ reverse acc)
+                                else readAll (chunk : acc)
+          readAll []
       B.hPut stderr r
       exitWith . fromSysExitCode $ case () of
        _| B.null r                         -> OK
@@ -270,6 +282,14 @@ main = do
              cat "Opening DNS listener on " (cfDNSListenAddress conf)
                  " failed: " e)
 
+  httpSock <- case cfHTTPListenAddress conf of
+    Nothing -> return Nothing
+    Just addr -> do
+      log Notice "Opening HTTP listener on " addr '.'
+      fmap Just . catchIO (bindListeningTCPSocket addr) $ \e ->
+        exitPrint (bindErrorCode e) $
+          cat "Opening HTTP listener on " addr " failed: " e
+
   testListeners <- case cfTestConfig conf of
     Nothing -> return M.empty
     Just testConf ->
@@ -299,7 +319,7 @@ main = do
     dropPrivileges ids
 
     let static = StaticState availFileDesc random statsSock reconfigSock
-    runMainThread static testListeners dnsSock conf
+    runMainThread static testListeners dnsSock httpSock conf
 
 -- | Given the command line arguments, check whether config options provided on
 -- the command line and in an optional config file are well-formed. If they are,
@@ -324,8 +344,9 @@ verifyConfig args =
 -- | Install signal handlers, start children of the main thread, and enter the
 -- main message-processing loop. Exit if we fail to start any threads.
 runMainThread :: StaticState -> Map SockAddr (Maybe Socket) -> Socket
-              -> Config -> IO ()
-runMainThread static initTestListeners initDNSListener initConf = do
+              -> Maybe Socket -> Config -> IO ()
+runMainThread static initTestListeners initDNSListener initHTTPListener
+              initConf = do
   mainChan <- newChan
   setTrapExit $ (writeChan mainChan .) . Exit
 
@@ -357,8 +378,10 @@ runMainThread static initTestListeners initDNSListener initConf = do
                   (mkExitTestConfig static initTestListeners initConf) initConf
       `E.onException` cleanup'
     dns <- startDNSServer (mkDNSServerConfig initDNSListener initConf)
+    web <- (startWebServer . mkWebConfig initConf) `liftMb` initHTTPListener
     return $ State (Just initLogger) (Just initReconfig) (Just stats) netState
-                   dns initTestListeners initDNSListener S.empty
+                   dns initTestListeners initDNSListener web initHTTPListener
+                   S.empty
 
   log Notice "Successfully initialized all main subsystems. If no warnings "
              "appear above, it looks like everything is working."
@@ -423,6 +446,7 @@ handleMessage _ static conf s (Reconfigure reconf) = flip runStateT s $ do
       reconfigureOrRestartLogger newConf'
       reconfigureListenersAndNetworkStateManager static newConf' errorRespond
       reconfigureDNSListenerAndServer static conf newConf' errorRespond
+      reconfigureHTTPListenerAndServer static conf newConf' errorRespond
       liftIO $ respond Nothing
       return newConf'
 
@@ -489,6 +513,12 @@ handleMessage mainChan static conf s (Exit tid reason)
                (show reason) "; restarting."
       newDNSServer <- startDNSServer $ mkDNSServerConfig (dnsListener s) conf
       return (conf, s { dnsServer = newDNSServer })
+  | Just web <- webServer s, tid == threadId web
+  , Just sock <- httpListener s = do
+      log Warn "The web server thread exited unexpectedly: "
+               (show reason) "; restarting."
+      newWebServer <- startWebServer $ mkWebConfig conf sock
+      return (conf, s { webServer = Just newWebServer })
   | tid `S.member` deadThreads s
   = return (conf, s { deadThreads = S.delete tid (deadThreads s) })
   | otherwise = do
@@ -508,9 +538,18 @@ mkDNSServerConfig dnsSock conf =
                    (cfSOARName conf) 0 ttl ttl ttl ttl
     , dnsNS = NS (cfZoneOfAuthority conf) ttl (cfDomainName conf)
     , dnsA = A (cfZoneOfAuthority conf) ttl `fmap` cfAddress conf
+    , dnsLists = cfExitLists conf
     , dnsByteStats = incrementBytes
     , dnsRespStats = incrementResponses }
   where DomainName authLabels = cfZoneOfAuthority conf
+
+-- | Return the web interface config given the listening HTTP socket.
+mkWebConfig :: Config -> Socket -> WebConfig
+mkWebConfig conf sock = WebConfig
+  { webSocket = sock
+  , webLists = cfExitLists conf
+  , webPublicAddress = cfHTTPPublicAddress conf
+  , webRequestStats = incrementHTTPRequests }
 
 -- | Return the exit test config.
 mkExitTestConfig :: StaticState -> Map SockAddr (Maybe Socket) -> Config
@@ -640,6 +679,59 @@ reconfigureDNSListenerAndServer static oldConf newConf errorRespond = do
       get >>= liftIO . flip (terminateProcess IOError static) Nothing
     Right _ -> return ()
 
+-- | Start, stop, or reconfigure the web interface and its listener according
+-- to the new config.
+reconfigureHTTPListenerAndServer
+  :: StaticState -> Config -> Config -> (String -> StateT State IO ())
+  -> StateT State IO ()
+reconfigureHTTPListenerAndServer static oldConf newConf errorRespond = do
+  s <- get
+  case (cfHTTPListenAddress newConf, httpListener s, webServer s) of
+    -- disabled
+    (Nothing, mbSock, mbWeb) -> do
+      whenJust mbWeb $ \web -> do
+        liftIO $ terminateWebServer Nothing web
+        modify' $ \s' -> s' { deadThreads = S.insert (threadId web)
+                                                     (deadThreads s') }
+      whenJust mbSock $ \sock -> do
+        log Notice "Closing HTTP listener."
+        liftIO . ignoreIOExn $ closeSocket sock
+      modify' $ \s' -> s' { webServer = Nothing, httpListener = Nothing }
+    -- enabled, possibly on a new address
+    (Just addr, mbSock, mbWeb) -> do
+      sock <- case mbSock of
+        Just sock | cfHTTPListenAddress oldConf == Just addr -> return sock
+        _ -> do
+          log Notice "Opening HTTP listener on " addr '.'
+          r <- liftIO . E.try $ bindListeningTCPSocket addr
+          case r of
+            Left (e :: E.IOException) -> do
+              errorRespond $ cat "Opening HTTP listener on " addr
+                                 " failed: " e "; exiting gracefully."
+              get >>= \s' -> liftIO $ terminateProcess (bindErrorCode e)
+                                                       static s' Nothing
+            Right sock -> do
+              -- An old web server closes its old listener when reconfigured
+              -- with the new one; without a server, close it ourselves.
+              when (isNothing mbWeb) $
+                whenJust mbSock $ liftIO . ignoreIOExn . closeSocket
+              return sock
+      case mbWeb of
+        Nothing -> do
+          web <- liftIO . startWebServer $ mkWebConfig newConf sock
+          modify' $ \s' -> s' { webServer = Just web, httpListener = Just sock }
+        Just web -> do
+          r <- liftIO . E.tryJust syncExceptions $
+                 reconfigureWebServer (const $ mkWebConfig newConf sock) web
+          case r of
+            Left e -> do
+              errorRespond $ cat "Reconfiguring web server failed: " e
+                                 "; exiting gracefully."
+              get >>= liftIO . flip (terminateProcess IOError static) Nothing
+            Right _ -> modify' $ \s' -> s' { httpListener = Just sock }
+  where
+    ignoreIOExn = (`catchIO` \_ -> return ())
+
 -- | Terminate the process by first asking all our linked, child threads to
 -- terminate gracefully, then releasing the resources held in 'StaticState'.
 terminateProcess :: SysExitCode -> StaticState -> State -> Maybe Int -> IO a
@@ -647,6 +739,7 @@ terminateProcess status static s mbWait = do
   whenJust (reconfigServer s) (terminateReconfigServer mbWait)
   terminateNetworkStateManager mbWait $ networkStateManager s
   terminateDNSServer mbWait $ dnsServer s
+  whenJust (webServer s) (terminateWebServer mbWait)
   whenJust (statsServer s) (terminateStatsServer mbWait)
   forM_ (M.assocs $ exitTestListeners s) $ \(addr,mbSock) ->
     whenJust mbSock $ \sock -> do
@@ -654,6 +747,9 @@ terminateProcess status static s mbWait = do
       ignoreIOExn $ closeSocket sock
   log Info "Closing DNS listener."
   ignoreIOExn . closeSocket $ dnsListener s
+  whenJust (httpListener s) $ \sock -> do
+    log Info "Closing HTTP listener."
+    ignoreIOExn $ closeSocket sock
   log Info "Closing statistics listener."
   ignoreIOExn . closeSocket $ statsSocket static
   log Info "Closing reconfigure listener."

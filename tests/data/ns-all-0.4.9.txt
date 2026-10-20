@@ -1,0 +1,30 @@
+r test002a PwgbMn+L93Wbuqmbcc1vNtx4GFQ oPDDE5pPjx54hZJOwhhJaKcYPg0 2038-01-01 00:00:00 127.0.0.1 5002 7002
+s Authority Exit Fast Guard HSDir Running Stable V2Dir Valid
+w Bandwidth=183
+p reject 1-65535
+r test001a VfPs7kGLaAQnBFh0h3Y6/KSI2Mo DphYvPnZVpBnqW6Sw1JCmk36u1E 2038-01-01 00:00:00 127.0.0.1 5001 7001
+s Authority Exit Guard HSDir Running Stable V2Dir Valid
+w Bandwidth=17
+p reject 1-65535
+r test003a ielhXjSUf4r1Y7za5f2ilVbtedw ro8Q2rTVuCzG8hPYsA2LuOy/JOE 2038-01-01 00:00:00 127.0.0.1 5003 7003
+s Authority Exit Fast Guard HSDir Running Stable V2Dir Valid
+w Bandwidth=248
+p reject 1-65535
+r test006ec lznu6vC0gJ38LZK/pGR7QdNkOCs iqYEHfBeCuUZoySJIemSK4RFUL8 2038-01-01 00:00:00 127.0.0.13 5006 0
+s Exit Fast Guard HSDir Running V2Dir Valid
+w Bandwidth=56
+p accept 443
+r test005eb pMOFAITWv2xgXIwlmgifX98BdiE /sfG4X/TZbkh9wwokg8g9hf89BU 2038-01-01 00:00:00 127.0.0.12 5005 0
+s Exit Fast Guard HSDir Running V2Dir Valid
+w Bandwidth=56
+p accept 1-65535
+r test000a xxnuD8w5HJLdIeS8caty+umDoKk eTI2jeVylnfF0ILd+02fdwo5t2o 2038-01-01 00:00:00 127.0.0.1 5000 7000
+s Authority Exit Fast Guard HSDir Running Stable V2Dir Valid
+w Bandwidth=180
+p reject 1-65535
+r test004ea yzXMxftj3wtBSF0uc9oHwccEcMw jmCdf8iX+yHkp/wC4Eik+MP8d7M 2038-01-01 00:00:00 127.0.0.11 5004 0
+s Exit Fast Guard HSDir Running V2Dir Valid
+w Bandwidth=214
+p accept 1-65535
+.
+250 OK

@@ -37,6 +37,9 @@ module TorDNSEL.NetworkState.Internals (
 
   -- * Tor controller
   , startTorController
+  , controlConnMV
+  , withExitMapping
+  , exitMappingName
 
   -- * Exit tests
   , initExitTestServerConfig
@@ -49,6 +52,7 @@ module TorDNSEL.NetworkState.Internals (
   , newExitAddress
   , newDescriptor
   , newRouterStatus
+  , newConsensus
   , expireOldInfo
   , insertAddress
   , deleteAddress
@@ -156,6 +160,8 @@ data ExitTestState = ExitTestState
 data ManagerMessage
   = NewDescriptors [Descriptor] -- ^ New descriptors are available.
   | NewNetworkStatus [RouterStatus] -- ^ New router status entries are available
+  -- | A new consensus listing every router that is currently in the network.
+  | NewConsensus [RouterStatus]
   -- | Map a new cookie to an exit node identifier, descriptor published time,
   -- and port.
   | MapCookie Cookie RouterID UTCTime Port
@@ -243,6 +249,18 @@ handleMessage _net conf (NewNetworkStatus rss) = do
                               (storageManager testState)
   return conf
 
+handleMessage _net conf (NewConsensus rss) = do
+  now <- liftIO getCurrentTime
+  networkState' <- gets $ expireOldInfo now . newConsensus now rss . networkState
+  modifyNetworkState networkState'
+  mbTestState <- gets exitTestState
+  whenJust mbTestState $ \testState -> liftIO $ do
+    notifyNewDirInfo (lookupRouters networkState' rsRouterID rss)
+                     (exitTestInitiator testState)
+    rebuildExitAddressStorage (nsRouters networkState')
+                              (storageManager testState)
+  return conf
+
 handleMessage _net conf (MapCookie cookie rid published port) = do
   mbTestState <- gets exitTestState
   case mbTestState of
@@ -304,7 +322,7 @@ handleMessage net conf (Reconfigure reconf signal)
           Left (tid,_) -> return tid
           Right conn -> do
             log Notice "Closing Tor controller connection."
-            liftIO $ closeConnection conn
+            liftIO $ forgetConnection >> closeConnection conn
             return $ threadId conn
         (controller,deadTid2) <- startTorController net newConf Nothing
         modify' $ \s ->
@@ -341,7 +359,9 @@ handleMessage net conf (Reconfigure reconf signal)
 handleMessage _net _conf (Terminate reason) = do
   log Info "Terminating network state manager."
   s <- get
-  either (const $ return ()) (liftIO . closeConnection) (torControlConn s)
+  either (const $ return ())
+         (\c -> liftIO $ forgetConnection >> closeConnection c)
+         (torControlConn s)
   whenJust (exitTestState s) $ \testState -> do
     terminateExitTests testState
     return ()
@@ -436,6 +456,45 @@ readNetworkState = readMVar networkStateMV
 --------------------------------------------------------------------------------
 -- Tor controller
 
+-- | The current Tor controller connection, if one is open. Exit test clients
+-- use it to install address mappings.
+controlConnMV :: MVar (Maybe Connection)
+{-# NOINLINE controlConnMV #-}
+controlConnMV = unsafePerformIO $ newMVar Nothing
+
+-- | Stop handing out the current controller connection.
+forgetConnection :: IO ()
+forgetConnection = () <$ swapMVar controlConnMV Nothing
+
+-- | The hostname we ask Tor's SOCKS port for when testing through an exit
+-- node, derived from the test's cookie so that it's unique per test.
+exitMappingName :: Cookie -> ByteString
+exitMappingName cookie =
+  B.concat [ B.pack "t", B.take 20 . encodeBase16 $ unCookie cookie
+           , B.pack ".tordnsel-test.invalid" ]
+
+-- | Make an exit test connection go through a particular exit node.
+--
+-- Tor refuses @.exit@ hostnames received on its SOCKS port, but still honours
+-- a @.exit@ target installed through the controller with MAPADDRESS. So we
+-- map a unique hostname to @testAddr.FINGERPRINT.exit@, pass that hostname to
+-- the action (which connects to it through the SOCKS port), and remove the
+-- mapping afterwards. Throw a 'TorControlError' if no controller connection is
+-- available or Tor refuses the mapping.
+withExitMapping :: HostAddress -> RouterID -> Cookie -> (ByteString -> IO a)
+                -> IO a
+withExitMapping testAddr rid cookie io = do
+  mbConn <- readMVar controlConnMV
+  conn <- maybe (E.throwIO ConnectionClosed) return mbConn
+  E.bracket_ (mapAddress [(name, target)] conn)
+             (unmapAddress [name] conn
+                `E.catch` \(_ :: TorControlError) -> return ())
+             (io name)
+  where
+    name = exitMappingName cookie
+    target = B.concat [ B.pack (inet_htoa testAddr), B.pack "."
+                      , encodeBase16RouterID rid, B.pack ".exit" ]
+
 -- | Attempt to start the Tor controller, given a delay in seconds to wait
 -- before trying again if starting it fails. If starting the controller fails,
 -- return the 'ThreadId' of a timer thread counting down until the next attempt
@@ -458,17 +517,21 @@ startTorController net conf mbDelay = liftIO $ do
           when (torVersion (protocolInfo conn) >= TorVersion 0 2 0 13 B.empty) $
             setConfWithRollback fetchDirInfoEarly (Just True) conn
 
-          let newNS = networkStatusEvent $ \errors ns -> do
-                logTorControlErrors "NS" errors
-                updateNetworkStatus net ns
+          -- NS events only carry entries that changed, and since Tor 0.4.8
+          -- unchanged relays may never reappear in them. NEWCONSENSUS events
+          -- list every router, so use those to keep our view complete.
+          let newCons = newConsensusEvent $ \errors ns -> do
+                logTorControlErrors "NEWCONSENSUS" errors
+                updateConsensus net ns
               newDesc = flip newDescriptorsEvent conn $ \errors ds -> do
-                logTorControlErrors "NewDesc" errors
+                logTorControlErrors "NEWDESC" errors
                 updateDescriptors net ds
-          registerEventHandlers [newNS, newDesc] conn
+          registerEventHandlers [newCons, newDesc] conn
 
-          getNetworkStatus conn >>= logParseErrors >>= updateNetworkStatus net
+          getNetworkStatus conn >>= logParseErrors >>= updateConsensus net
           getAllDescriptors conn >>= logParseErrors >>= updateDescriptors net
 
+          swapMVar controlConnMV (Just conn)
           return conn
   case r of
     Left reason -> do
@@ -488,7 +551,7 @@ startTorController net conf mbDelay = liftIO $ do
     logParseErrors (xs,errors) = mapM_ (log Warn) errors >> return xs
 
     updateDescriptors (NetworkStateManager send _) = send . NewDescriptors
-    updateNetworkStatus (NetworkStateManager send _) = send . NewNetworkStatus
+    updateConsensus (NetworkStateManager send _) = send . NewConsensus
     nextDelay | delay' < maxDelay = delay'
               | otherwise          = maxDelay
     delay' = delay * backoffFactor
@@ -517,6 +580,7 @@ initExitTestInitiatorConfig
 initExitTestInitiatorConfig net conf = ExitTestInitiatorConfig
   { eticfGetNetworkState = readNetworkState
   , eticfWithCookie = withCookie net (etcfGetRandBytes conf)
+  , eticfWithExitMapping = withExitMapping
   , eticfConcClientLimit = etcfConcClientLimit conf
   , eticfSocksServer = etcfTorSocksAddr conf
   , eticfTestAddress = etcfTestAddress conf
@@ -633,6 +697,17 @@ newDescriptor now s !newD
     insertAddr d = insertAddress (descListenAddr d) rid
     deleteAddr d = deleteAddress (descListenAddr d) rid
     rid = descRouterID newD
+
+-- | Update the network state with a complete consensus: every listed router is
+-- refreshed and routers absent from it are no longer considered running.
+newConsensus :: UTCTime -> [RouterStatus] -> NetworkState -> NetworkState
+newConsensus now rss s = L.foldl' (newRouterStatus now) s' rss
+  where
+    listed = S.fromList $ map rsRouterID rss
+    s' = s { nsRouters = M.mapWithKey markAbsent (nsRouters s) }
+    markAbsent rid r
+      | rid `S.member` listed = r
+      | otherwise             = r { rtrIsRunning = False }
 
 -- | Update the network state with a new router status entry.
 newRouterStatus :: UTCTime -> NetworkState -> RouterStatus -> NetworkState

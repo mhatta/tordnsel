@@ -1,5 +1,3 @@
-{-# OPTIONS_GHC -fno-warn-incomplete-patterns #-}
-
 -----------------------------------------------------------------------------
 -- |
 -- Module      : TorDNSEL.DNS.Server.Internals
@@ -12,7 +10,27 @@
 -- /Internals/: should only be imported by the public module and tests.
 --
 -- Implements a DNS server thread that answers DNS queries for exit list
--- information.
+-- information, as described in @doc/torel-design.txt@:
+--
+-- [Query type 1, \"ip-port\"]
+--   @{IP1}.{port}.{IP2}.ip-port.{zone}@ is listed iff {IP1} is a Tor exit
+--   that permits connections to {port} on {IP2}.
+--
+-- [Query type 2, \"list\"]
+--   @{IP}.{listname}.list.{zone}@ is listed iff {IP} is a Tor exit that
+--   permits connections to any member of the operator-configured list
+--   {listname}.
+--
+-- [Query type 3, \"me\"]
+--   @{IP}.{port}.me.{zone}@ is listed iff {IP} is a Tor exit that permits
+--   connections to {port} on the host that sent the query. Because the answer
+--   depends on who asks, it is sent with a TTL of zero so that resolvers
+--   don't hand it to other clients.
+--
+-- Listed names have an A record of 127.0.0.2 and a TXT record explaining the
+-- listing. Unlisted names are NXDOMAIN; names that are a proper prefix of a
+-- valid query exist as empty non-terminals (NOERROR with no data), which keeps
+-- resolvers using QNAME minimisation (RFC 9156) working.
 --
 -----------------------------------------------------------------------------
 
@@ -21,23 +39,23 @@ module TorDNSEL.DNS.Server.Internals where
 
 import Prelude hiding (log)
 import qualified Control.Exception as E
-import Control.Monad (when, guard, liftM2, liftM3)
+import Control.Monad (when, guard)
 import Data.Bits ((.|.), shiftL)
 import qualified Data.ByteString.Char8 as B
+import Data.ByteString (ByteString)
 import Data.Dynamic (Typeable)
-import Data.Char (toLower)
+import Data.Char (toLower, isDigit)
 import qualified Data.List as L
 import qualified Data.Map as M
-import Data.Maybe (isNothing, maybeToList, mapMaybe)
-import qualified Data.Set as S
+import Data.Maybe (isNothing, maybeToList)
 import Data.Time.Clock.POSIX (POSIXTime, getPOSIXTime)
-import Data.Word (Word8, Word32)
-import Network.Socket (Socket, HostAddress)
+import Data.Word (Word32)
+import Network.Socket (Socket, HostAddress, SockAddr(..))
 
 import TorDNSEL.Control.Concurrent.Link
 import TorDNSEL.Control.Concurrent.Util
-import TorDNSEL.Directory
 import TorDNSEL.DNS
+import TorDNSEL.ExitList
 import TorDNSEL.Log
 import TorDNSEL.NetworkState
 import TorDNSEL.NetworkState.Types
@@ -53,6 +71,8 @@ data DNSConfig
   , dnsNS       :: !ResourceRecord -- ^ Our own NS record.
   -- | The A record we return for our authoritative zone.
   , dnsA        :: !(Maybe ResourceRecord)
+  -- | Operator-configured lists of destinations for \"list\" queries.
+  , dnsLists    :: !NamedLists
   -- | An action invoked with bytes received and sent for recording statistics.
   , dnsByteStats :: !(Int -> Int -> IO ())
   -- | A statistics tracking action invoked with each response.
@@ -60,7 +80,8 @@ data DNSConfig
 
 instance Eq DNSConfig where
   x == y = all (\(===) -> x === y)
-    [eq dnsSocket, eq dnsAuthZone, eq dnsMyName, eq dnsSOA, eq dnsNS, eq dnsA]
+    [ eq dnsSocket, eq dnsAuthZone, eq dnsMyName, eq dnsSOA, eq dnsNS, eq dnsA
+    , eq dnsLists ]
     where
       eq :: Eq b => (a -> b) -> a -> a -> Bool
       eq = on (==)
@@ -129,69 +150,98 @@ terminateDNSServer mbWait (DNSServer tid) =
   terminateThread mbWait tid (throwTo tid $ exitReason $ Terminate NormalExit)
 
 -- | A stateful wrapper for 'dnsResponse'.
-dnsHandler :: DNSConfig -> Message -> IO (Maybe Message)
+dnsHandler :: DNSConfig -> SockAddr -> Message -> IO (Maybe Message)
 {-# INLINE dnsHandler #-}
-dnsHandler conf msg
+dnsHandler conf src msg
   -- draft-arends-dnsext-qr-clarification-00
   | msgQR msg = return Nothing
   | otherwise = do
-      (typ,resp) <- liftM2 (dnsResponse conf msg) getPOSIXTime readNetworkState
+      now <- getPOSIXTime
+      ns <- readNetworkState
+      let (typ,resp) = dnsResponse conf src msg now ns
       dnsRespStats conf typ
       return $ Just resp
 
--- | Given our config data and a DNS query, parse the exit list query contained
--- therein and generate an appropriate DNS response based on our knowledge of
--- the current state of the Tor network.
-dnsResponse :: DNSConfig -> Message -> POSIXTime -> NetworkState
+-- | Given our config data, the address a query came from and the query itself,
+-- parse the exit list query contained therein and generate an appropriate DNS
+-- response based on our knowledge of the current state of the Tor network.
+dnsResponse :: DNSConfig -> SockAddr -> Message -> POSIXTime -> NetworkState
             -> (ResponseType, Message)
 {-# INLINE dnsResponse #-}
-dnsResponse c msg now ns
-  | msgOpCode msg /= StandardQuery -- RFC 3425
-  = (Other, r { msgAA = False, msgRCode = NotImplemented
-              , msgAnswers = [], msgAuthority = [dnsSOA c] })
-  -- draft-koch-dns-unsolicited-queries-01
-  | isNothing mbQLabels
-  = (Other, r { msgAA = False, msgRCode = Refused
-              , msgAnswers = [], msgAuthority = [dnsSOA c] })
-  | qc /= IN = (Other, nxDomain)
-  -- a request matching our authoritative zone
-  | Just [] <- mbQLabels = case qt of
-      TA | Just a <- dnsA c
-           -> (Other, noErr { msgAnswers = [a], msgAuthority = [dnsNS c] })
-      TNS  -> (Other, noErr { msgAnswers = [dnsNS c], msgAuthority = [] })
-      TSOA -> (Other, noErr { msgAnswers = [dnsSOA c]
-                            , msgAuthority = [dnsNS c] })
-      TAny -> (Other, noErr { msgAnswers = [dnsSOA c, dnsNS c] ++
-                              maybeToList (dnsA c), msgAuthority = [dnsNS c] })
-      _    -> (Other, noErr { msgAnswers = [], msgAuthority = [dnsSOA c] })
-  -- a incomplete request
-  | Just qLabels <- mbQLabels
-  , Nothing      <- parseExitListQuery qLabels
-  , B.map toLower (unLabel (head qLabels)) == B.pack "ip-port" && length qLabels <= 9
-  = emptyAnswer
-  -- a full request
-  | Just qLabels <- mbQLabels
-  , Just query   <- parseExitListQuery qLabels
-  = if isTest query || isExitNode now ns query
-      then if qt == TA || qt == TAny
-        -- draft-irtf-asrg-dnsbl-02
-        then (Positive, noErr { msgAnswers = [positive]
+dnsResponse c src msg now ns = withEDNS $ case () of
+  _ | msgOpCode msg /= StandardQuery -- RFC 3425
+    -> (Other, r { msgAA = False, msgRCode = NotImplemented
+                 , msgAnswers = [], msgAuthority = [dnsSOA c] })
+    -- RFC 6891: we only speak EDNS version 0
+    | Just e <- edns, ednsVersion e > 0
+    -> (Other, r { msgAA = False, msgRCode = fst badVersRCode
+                 , msgAnswers = [], msgAuthority = [] })
+    -- draft-koch-dns-unsolicited-queries-01
+    | isNothing mbQLabels
+    -> (Other, r { msgAA = False, msgRCode = Refused
+                 , msgAnswers = [], msgAuthority = [dnsSOA c] })
+    | qc /= IN -> (Other, nxDomain soa)
+    -- a request matching our authoritative zone
+    | Just [] <- mbQLabels -> case qt of
+        TA | Just a <- dnsA c
+             -> (Other, noErr { msgAnswers = [a], msgAuthority = [dnsNS c] })
+        TNS  -> (Other, noErr { msgAnswers = [dnsNS c], msgAuthority = [] })
+        TSOA -> (Other, noErr { msgAnswers = [dnsSOA c]
                               , msgAuthority = [dnsNS c] })
-        -- RFC 2308
-        else emptyAnswer
-      else (Negative, nxDomain)
-  | otherwise = (Other, nxDomain)
+        TAny -> (Other, noErr { msgAnswers = [dnsSOA c, dnsNS c] ++
+                                maybeToList (dnsA c)
+                              , msgAuthority = [dnsNS c] })
+        _    -> (Other, emptyAnswer soa)
+    | Just qLabels <- mbQLabels -> case parseExitListQuery (dnsLists c) qLabels of
+        -- an empty non-terminal on the way to a valid query
+        PartialQuery -> (Other, emptyAnswer soa)
+        NoSuchName   -> (Other, nxDomain soa)
+        FullQuery query
+          | isListed query -> positive query
+          | otherwise      -> (Negative, nxDomain (soaFor query))
+    | otherwise -> (Other, nxDomain soa) -- impossible
   where
-    isTest q = queryAddr q == 0x7f000002
-    mbQLabels = dropAuthZone (dnsAuthZone c) (qName question)
-    positive = A (qName question) ttl 0x7f000002
+    edns = findEDNS msg
+    withEDNS (typ,resp) = case edns of
+      Nothing -> (typ, resp)
+      Just e  -> (typ, resp { msgAdditional = [ednsRecord ext (ednsDO e)] })
+        where ext | ednsVersion e > 0 = snd badVersRCode
+                  | otherwise         = 0
+
+    isListed q = queryAddr q == testAddress ||
+                 maybe False (isExitTo now ns (queryAddr q))
+                       (queryDestination (dnsLists c) src q)
+
+    positive q
+      | qt `elem` [TA, TTXT, TAny] =
+          (Positive, noErr { msgAnswers = [rr | (t,rr) <- records, wanted t]
+                           , msgAuthority = [dnsNS c] })
+      -- RFC 2308
+      | otherwise = (Positive, emptyAnswer (soaFor q))
+      where
+        records = [ (TA,   A name (ttlFor q) testAddress)
+                  , (TTXT, TXT name (ttlFor q) [explainListing q]) ]
+        wanted t = qt == TAny || qt == t
+
+    -- Answers to "me" queries depend on the asker, so they mustn't be cached,
+    -- not even negatively (RFC 2308 uses the SOA's TTL and MINIMUM).
+    ttlFor q | isMeQuery q = 0
+             | otherwise   = ttl
+    soaFor q | isMeQuery q = uncacheable soa
+             | otherwise   = soa
+    uncacheable (SOA n _ m rn se re rt ex _) = SOA n 0 m rn se re rt ex 0
+    uncacheable rr                           = rr
+    soa = dnsSOA c
+
+    mbQLabels = dropAuthZone (dnsAuthZone c) name
     noErr = r { msgAA = True, msgRCode = NoError }
-    emptyAnswer = (Other, noErr { msgAnswers = [], msgAuthority = [dnsSOA c] })
-    nxDomain = r { msgAA = True, msgRCode = NXDomain, msgAnswers = []
-                 , msgAuthority = [dnsSOA c] }
+    emptyAnswer s = noErr { msgAnswers = [], msgAuthority = [s] }
+    nxDomain s = r { msgAA = True, msgRCode = NXDomain, msgAnswers = []
+                   , msgAuthority = [s] }
     r = msg { msgQR = True, msgTC = False, msgRA = False, msgAD = False
             , msgAdditional = [] }
     question = msgQuestion msg
+    name = qName question
     (qt,qc) = (qType question, qClass question)
 
 -- | Given @authZone@, a sequence of labels ordered from top to bottom
@@ -222,8 +272,8 @@ dropAuthZone (DomainName authZone) (DomainName name) =
 
 -- | Queries asking whether there's a Tor exit node at a specific IP address.
 data ExitListQuery
-  -- |  Query type 1 from
-  -- <https://gitweb.torproject.org/tordnsel.git/tree/doc/torel-design.txt>
+  -- | Query type 1 from @doc/torel-design.txt@:
+  -- @{IP1}.{port}.{IP2}.ip-port.{zone}@.
   = IPPort
   { -- | The address of the candidate exit node.
     queryAddr :: !HostAddress,
@@ -231,46 +281,120 @@ data ExitListQuery
     destAddr  :: !HostAddress,
     -- | The destination port.
     destPort  :: !Port
+  }
+  -- | Query type 2: @{IP}.{listname}.list.{zone}@.
+  | IPList
+  { queryAddr :: !HostAddress,
+    -- | The name of the configured destination list.
+    listName  :: !ListName
+  }
+  -- | Query type 3: @{IP}.{port}.me.{zone}@. The destination address is the
+  -- address the query came from.
+  | IPMe
+  { queryAddr :: !HostAddress,
+    destPort  :: !Port
   } deriving Eq
 
 instance Show ExitListQuery where
   showsPrec _ (IPPort qAddr dAddr dPort) =
     cat "query ip: " (inet_htoa qAddr) " dest ip: " (inet_htoa dAddr)
         " dest port: " dPort
+  showsPrec _ (IPList qAddr name) =
+    cat "query ip: " (inet_htoa qAddr) " list: " name
+  showsPrec _ (IPMe qAddr dPort) =
+    cat "query ip: " (inet_htoa qAddr) " dest: requester port: " dPort
+
+-- | The result of parsing the part of a query name below our zone.
+data ParsedQuery
+  = FullQuery !ExitListQuery -- ^ A complete exit list query.
+  | PartialQuery             -- ^ A proper prefix of a possible query.
+  | NoSuchName               -- ^ Neither.
+  deriving (Eq, Show)
+
+-- | Is this a query whose answer depends on who is asking?
+isMeQuery :: ExitListQuery -> Bool
+isMeQuery IPMe{} = True
+isMeQuery _      = False
+
+-- | The address used to test DNSBL configurations (RFC 5782, section 5).
+-- It is always listed.
+testAddress :: HostAddress
+testAddress = 0x7f000002
+
+-- | The destination a query asks about, given the configured lists and the
+-- address the query came from. 'Nothing' means no Tor exit node can reach
+-- the destination: an unknown list, or a \"me\" query from an IPv6 host
+-- (we only have exit policies for IPv4).
+queryDestination :: NamedLists -> SockAddr -> ExitListQuery -> Maybe Destination
+queryDestination _ _ (IPPort _ dAddr dPort) = Just $ DestAddrPort dAddr dPort
+queryDestination lists _ (IPList _ name)  = DestAnyOf `fmap` M.lookup name lists
+queryDestination _ src (IPMe _ dPort)     = case src of
+  SockAddrInet _ addr -> Just $ DestAddrPort (ntohl addr) dPort
+  SockAddrInet6 _ _ (0, 0, 0xffff, addr) _ -> Just $ DestAddrPort addr dPort
+  _ -> Nothing
+
+-- | A short human-readable explanation of a positive answer, returned in TXT
+-- records (RFC 5782, section 2.1).
+explainListing :: ExitListQuery -> ByteString
+explainListing q = B.pack $ case q of
+  IPPort a d p -> inet_htoa a ++ " is a Tor exit node permitting connections \
+                                  \to " ++ inet_htoa d ++ ":" ++ show p
+  IPList a n   -> inet_htoa a ++ " is a Tor exit node permitting connections \
+                                  \to list " ++ B.unpack n
+  IPMe a p     -> inet_htoa a ++ " is a Tor exit node permitting connections \
+                                  \to port " ++ show p ++ " of the querying host"
 
 -- | Parse an exit list query from a sequence of labels ordered from top to
 -- bottom representing the query portion of a domain name, e.g.
--- @\"ip-port.{IP2}.{port}.{IP1}\"@.
-parseExitListQuery :: [Label] -> Maybe ExitListQuery
-{-# INLINE parseExitListQuery #-}
-parseExitListQuery labels = do
-  (queryType:ip2,port:ip1) <- return . splitAt 5 . map unLabel $ labels
-  guard $ length ip1 == 4 && B.map toLower queryType == B.pack "ip-port"
-  liftM3 IPPort (toAddress ip1) (toAddress ip2) (hush $ parsePort port)
+-- @\"ip-port.{IP2}.{port}.{IP1}\"@. Prefixes of valid queries are recognised
+-- so that they can be answered as empty non-terminals.
+parseExitListQuery :: NamedLists -> [Label] -> ParsedQuery
+parseExitListQuery lists labels = case map (B.map toLower . unLabel) labels of
+  []           -> PartialQuery
+  typ : rest
+    | typ == B.pack "ip-port" -> parseWith [octet, octet, octet, octet, port,
+                                            octet, octet, octet, octet]
+                                           ipPort rest
+    | typ == B.pack "list", not (M.null lists)
+                              -> parseWith [listLabel, octet, octet, octet,
+                                            octet]
+                                           ipList rest
+    | typ == B.pack "me"      -> parseWith [port, octet, octet, octet, octet]
+                                           ipMe rest
+  _            -> NoSuchName
   where
+    parseWith fields mk xs
+      | length xs > length fields          = NoSuchName
+      | not . and $ zipWith ($) fields xs  = NoSuchName
+      | length xs < length fields          = PartialQuery
+      | otherwise = maybe NoSuchName FullQuery (mk xs)
+
+    ipPort [a,b,c,d,p,e,f,g,h] =
+      IPPort `fmap` toAddress [e,f,g,h] `ap'` toAddress [a,b,c,d] `ap'` toPort p
+    ipPort _ = Nothing
+    ipList [n,a,b,c,d] = (`IPList` n) `fmap` toAddress [a,b,c,d]
+    ipList _ = Nothing
+    ipMe [p,a,b,c,d] = IPMe `fmap` toAddress [a,b,c,d] `ap'` toPort p
+    ipMe _ = Nothing
+
+    ap' mf mx = do { f <- mf; x <- mx; return (f x) }
+
+    octet bs = isDecimal 3 bs && maybe False (<= 255) (readDecimal bs)
+    port bs  = isDecimal 5 bs && maybe False (<= 65535) (readDecimal bs)
+    listLabel n = n `M.member` lists
+
+    isDecimal maxLen bs = not (B.null bs) && B.length bs <= maxLen &&
+                          B.all isDigit bs
+    readDecimal bs = case B.readInt bs of
+      Just (n,rest) | B.null rest -> Just n
+      _                           -> Nothing
+
+    toPort bs = fromIntegral `fmap` (guard (port bs) >> readDecimal bs)
     toAddress xs = do
-      os <- mapM (fmap fromIntegral . hush . readInt) xs
-      guard $ all (`inBoundsOf` (undefined :: Word8)) os
-      return $! L.foldl' (.|.) 0 . zipWith shiftL os $ [24,16..]
-
--- | Does a query represent a Tor exit node cabable of exiting to a particular
--- network service in our current view of the Tor network?
-isExitNode :: POSIXTime -> NetworkState -> ExitListQuery -> Bool
-{-# INLINE isExitNode #-}
-isExitNode now s q = maybe False (any isExit . mapMaybe lookupDesc . S.elems) ns
-  where
-    ns = queryAddr q `M.lookup` nsAddrs s
-    lookupDesc rid = rtrDescriptor =<< rid `M.lookup` nsRouters s
-    isExit d = isRunning now d &&
-               exitPolicyAccepts (destAddr q) (destPort q) (descExitPolicy d)
-
--- | We consider a router to be running if it last published a descriptor less
--- than 48 hours ago. Descriptors hold an unboxed 'POSIXTime' instead of a
--- 'UTCTime' to prevent this function from showing up in profiles.
-isRunning :: POSIXTime -> Descriptor -> Bool
-{-# INLINE isRunning #-}
-isRunning now d = now - descPublished d < maxRouterAge
-  where maxRouterAge = 60 * 60 * 48
+      os <- mapM readDecimal xs
+      guard $ all (<= 255) os
+      return $! L.foldl' (.|.) 0 . zipWith shiftL (map fromIntegral os) $
+                [24,16..]
 
 -- | The time-to-live set for caching.
 ttl :: Word32

@@ -32,6 +32,12 @@ module TorDNSEL.DNS (
   , OpCode(..)
   , Type(..)
   , Class(..)
+
+  -- * EDNS(0)
+  , EDNS(..)
+  , findEDNS
+  , ednsRecord
+  , badVersRCode
   ) where
 
 import TorDNSEL.DNS.Internals

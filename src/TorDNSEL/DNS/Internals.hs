@@ -56,6 +56,13 @@ module TorDNSEL.DNS.Internals (
   , OpCode(..)
   , Type(..)
   , Class(..)
+
+  -- * EDNS(0)
+  , EDNS(..)
+  , findEDNS
+  , ednsRecord
+  , ednsUDPSize
+  , badVersRCode
   ) where
 
 import qualified Control.Exception as E
@@ -91,26 +98,34 @@ import TorDNSEL.Util
 -- | Run a DNS server using a bound UDP socket. Pass received messages to the
 -- handler and send back responses returned by the handler.
 runServer
-  :: Socket -> (Int -> Int -> IO ()) -> (Message -> IO (Maybe Message)) -> IO ()
+  :: Socket -> (Int -> Int -> IO ()) -> (SockAddr -> Message -> IO (Maybe Message))
+  -> IO ()
 {-# INLINE runServer #-} -- critical
 runServer sock stats handler = forever $ do
   (msg,inBytes,addr) <- recvMessageFrom sock
   outBytes <- handleQuery msg addr
   stats inBytes outBytes
   where
-    handleQuery (Just query) sockAddr@(SockAddrInet port _)
-      | (fromIntegral port :: Int) >= 1024 = do
-          response <- handler query
+    -- Ignore datagrams from privileged ports: legitimate resolvers never use
+    -- them, and answering them would let us be used in reflection attacks
+    -- against services such as chargen or echo.
+    handleQuery (Just query) sockAddr
+      | Just port <- sourcePort sockAddr, port >= 1024 = do
+          response <- handler sockAddr query
           case response of
             Just r  -> sendMessageTo sock r sockAddr
             Nothing -> return 0
     handleQuery _ _ = return 0
+    sourcePort (SockAddrInet port _)      = Just (fromIntegral port :: Int)
+    sourcePort (SockAddrInet6 port _ _ _) = Just (fromIntegral port)
+    sourcePort _                          = Nothing
 
 -- | Read a DNS message from a bound UDP socket. Return the source 'SockAddr',
 -- the number of bytes read, and @'Just' msg@ if parsing the message succeeded.
 recvMessageFrom :: Socket -> IO (Maybe Message, Int, SockAddr)
 recvMessageFrom sock = do
-  (pkt,sockAddr) <- recvFrom sock 512
+  -- EDNS(0) queries may be larger than 512 bytes.
+  (pkt,sockAddr) <- recvFrom sock 4096
   msg <- decodeMessage $ Packet pkt
   return (msg, B.length pkt, sockAddr)
 
@@ -438,7 +453,17 @@ data ResourceRecord
       -- negative responses.
       soaMinimum :: !Word32 }
 
-  -- | An unsupported record.
+  -- | A record containing one or more character strings.
+  | TXT
+    { -- | The domain name to which this record pertains.
+      rrName     :: !DomainName,
+      -- | A time interval, in seconds, that the answer may be cached.
+      rrTTL      :: !Word32,
+      -- | The character strings, each at most 255 bytes long.
+      txtStrings :: ![ByteString] }
+
+  -- | An unsupported record. The EDNS(0) OPT pseudo-record is represented
+  -- this way too.
   | UnsupportedResourceRecord
     { -- | The domain name to which this record pertains.
       rrName  :: !DomainName,
@@ -458,6 +483,7 @@ instance NFData ResourceRecord where
            A{}   -> aAddr rr `deepseq` ()
            NS{}  -> nsDName rr `deepseq` ()
            SOA{} -> soaMName rr `deepseq` soaRName rr `deepseq` ()
+           TXT{} -> txtStrings rr `deepseq` ()
            _     -> ()
 
 instance BinaryPacket ResourceRecord where
@@ -470,6 +496,7 @@ instance BinaryPacket ResourceRecord where
     begin  <- bytesRead
     rec <- case (rClass, rType) of
       (IN,TA)   -> A name ttl `fmap` get
+      (IN,TTXT) -> TXT name ttl `fmap` getStrings (fromIntegral len)
       (IN,TNS)  -> NS name ttl `fmap` getPacket pkt
       (IN,TSOA) -> do
         mName <- getPacket pkt
@@ -487,6 +514,14 @@ instance BinaryPacket ResourceRecord where
     if end - begin == fromIntegral len
       then return rec
       else fail "incorrect rdata length"
+    where
+      getStrings :: Int -> Get [ByteString]
+      getStrings 0 = return []
+      getStrings n = do
+        l <- getWord8
+        when (fromIntegral l + 1 > n) $ fail "character string too long"
+        str <- getByteString (fromIntegral l)
+        (str :) `fmap` getStrings (n - 1 - fromIntegral l)
 
   putPacket (A name ttl addr) = do
     putPacket name
@@ -514,10 +549,22 @@ instance BinaryPacket ResourceRecord where
       mapM_ put [serial, refresh, retry, expire, minim]
     incrOffset 20
 
+  putPacket (TXT name ttl strs) = do
+    putPacket name
+    lift $ do
+      put TTXT >> put IN >> put ttl
+      putWord16be . fromIntegral $ rdLen
+      mapM_ (\s -> putWord8 (fromIntegral $ B.length s) >> putByteString s) strs'
+    incrOffset (10 + rdLen)
+    where
+      strs' = map (B.take 255) strs
+      rdLen = sum $ map ((+ 1) . B.length) strs'
+
+  -- The wire format is NAME TYPE CLASS TTL RDLENGTH RDATA.
   putPacket (UnsupportedResourceRecord name ttl rType rClass rData) = do
     putPacket name
     lift $ do
-      put ttl >> put rType >> put rClass
+      put rType >> put rClass >> put ttl
       putWord16be . fromIntegral . B.length $ rData
       putByteString rData
     incrOffset (10 + B.length rData)
@@ -613,6 +660,8 @@ data Type
   = TA                      -- ^ An IPv4 host address.
   | TNS                     -- ^ An authoritative name server.
   | TSOA                    -- ^ A start of zone of authority.
+  | TTXT                    -- ^ Text strings.
+  | TOPT                    -- ^ The EDNS(0) OPT pseudo-record.
   | TAny                    -- ^ A request for all records.
   | UnsupportedType !Word16 -- ^ Any other type.
   deriving (Eq, Show)
@@ -627,12 +676,16 @@ instance Binary Type where
       1   -> return TA
       2   -> return TNS
       6   -> return TSOA
+      16  -> return TTXT
+      41  -> return TOPT
       255 -> return TAny
       _   -> return $ UnsupportedType t
 
   put TA                  = putWord16be 1
   put TNS                 = putWord16be 2
   put TSOA                = putWord16be 6
+  put TTXT                = putWord16be 16
+  put TOPT                = putWord16be 41
   put TAny                = putWord16be 255
   put (UnsupportedType t) = put t
 
@@ -656,3 +709,47 @@ instance Binary Class where
 
   put IN                   = putWord16be 1
   put (UnsupportedClass c) = put c
+
+--------------------------------------------------------------------------------
+-- EDNS(0)
+
+-- | The EDNS(0) information carried by an OPT pseudo-record (RFC 6891).
+data EDNS = EDNS
+  { ednsPayloadSize :: !Word16 -- ^ The requestor's UDP payload size.
+  , ednsExtRCode    :: !Word8  -- ^ Upper 8 bits of the extended RCODE.
+  , ednsVersion     :: !Word8  -- ^ The EDNS version.
+  , ednsDO          :: !Bool   -- ^ The DNSSEC OK bit.
+  } deriving (Eq, Show)
+
+-- | Find the EDNS information in a message's additional section, if any.
+findEDNS :: Message -> Maybe EDNS
+findEDNS msg = case [rr | rr@UnsupportedResourceRecord{rrType = TOPT}
+                            <- msgAdditional msg] of
+  UnsupportedResourceRecord _ ttl _ cls _ : _ ->
+    Just $! EDNS (classValue cls) (fromIntegral $ ttl `shiftR` 24)
+                 (fromIntegral $ ttl `shiftR` 16) (testBit ttl 15)
+  _ -> Nothing
+  where
+    classValue IN                   = 1
+    classValue (UnsupportedClass c) = c
+
+-- | An OPT pseudo-record advertising our UDP payload size, carrying the given
+-- extended RCODE bits and echoing the DO bit (RFC 3225).
+ednsRecord :: Word8 -> Bool -> ResourceRecord
+ednsRecord extRCode dnssecOK =
+  UnsupportedResourceRecord (DomainName []) ttl TOPT
+                            (UnsupportedClass ednsUDPSize) B.empty
+  where
+    ttl = (fromIntegral extRCode `shiftL` 24) .|.
+          (if dnssecOK then 0x8000 else 0)
+
+-- | The UDP payload size we advertise. 1232 bytes avoids IP fragmentation on
+-- practically all paths (DNS Flag Day 2020).
+ednsUDPSize :: Word16
+ednsUDPSize = 1232
+
+-- | The extended RCODE BADVERS (16), split into the 4 bits carried in the
+-- header and the 8 bits carried in the OPT record.
+badVersRCode :: (RCode, Word8)
+badVersRCode = (NoError, 1)
+

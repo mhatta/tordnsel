@@ -16,13 +16,69 @@
 module TorDNSEL.Directory.Tests (tests) where
 
 import qualified Data.ByteString.Char8 as B
-import Test.HUnit (Test(..), (@=?))
+import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
+import Network.Socket (HostAddress)
+import Test.HUnit (Test(..), (@=?), (@?))
 
 import TorDNSEL.Directory.Internals
 import TorDNSEL.Document
 import TorDNSEL.Util
 
-tests = TestList [TestCase descriptorParses, fingerprint, TestCase exitPolicy]
+tests = TestList [ TestCase descriptorParses, fingerprint, TestCase exitPolicy
+                 , TestCase modernDescriptor, TestCase modernStatuses
+                 , TestCase statusLines, TestCase modernPolicies ]
+
+-- | A router descriptor published by Tor 0.4.9.6 (from a chutney network).
+modernDescriptor = do
+  doc <- B.readFile "tests/data/descriptor-0.4.9.txt"
+  case parseDescriptors . parseDocument $ B.lines doc of
+    [Right d] -> do
+      "9739eeeaf0b4809dfc2d92bfa4647b41d364382b"
+        @=? encodeBase16RouterID (descRouterID d)
+      ip "127.0.0.13" @=? descListenAddr d
+      "2026-10-20 02:38:39 UTC" @=? show (posixSecondsToUTCTime $ descPublished d)
+      [ Rule Accept (ip "127.0.0.0") 0xff000000 6667 6667
+        , Rule Accept 0 0 443 443
+        , Rule Reject 0 0 0 65535 ] @=? descExitPolicy d
+    other -> fail $ "unexpected parse: " ++ show (map (either (Left . ($ "")) Right) other)
+
+-- | The output of GETINFO ns/all from Tor 0.4.9.6: the publication time is a
+-- fixed placeholder since 0.4.8, but the entries are otherwise as before.
+modernStatuses = do
+  doc <- B.readFile "tests/data/ns-all-0.4.9.txt"
+  let rss = parseRouterStatuses . parseDocument $ B.lines doc
+  7 @=? length [() | Right _ <- rss]
+  all (either (const False) rsIsRunning) rss @? "all running"
+
+-- | Both "r" line formats parse to the same thing.
+statusLines = do
+  let full = [ "r test004ea yzXMxftj3wtBSF0uc9oHwccEcMw jmCdf8iX+yHkp/wC4Eik+MP8d7M \
+               \2038-01-01 00:00:00 10.200.0.11 5004 0", "s Exit Running Valid" ]
+      micro = [ "r test004ea yzXMxftj3wtBSF0uc9oHwccEcMw \
+                \2038-01-01 00:00:00 10.200.0.11 5004 0", "s Exit Valid" ]
+      parse = either (Left . ($ "")) (Right . (\r -> (rsRouterID r, rsIsRunning r)))
+            . parseRouterStatus . parseDocument
+      rid = either (error . ($ "")) id
+              (decodeBase16RouterID "cb35ccc5fb63df0b41485d2e73da07c1c70470cc")
+  Right (rid, True) @=? parse full
+  Right (rid, False) @=? parse micro
+
+-- | Policy syntax that Tor can emit and that we must not choke on.
+modernPolicies = do
+  let parse = either (error . ($ "")) id . parseExitPolicy . parseDocument
+  parse ["reject private:*", "accept *:*"]
+    @=? [Rule Reject a m 0 65535 | (a,m) <- privateNetworks] ++
+        [Rule Accept 0 0 0 65535]
+  -- IPv6 patterns can't match IPv4 destinations and are dropped
+  parse ["reject [2001:db8::]/32:*", "reject *6:25", "reject *4:80", "accept *:*"]
+    @=? [Rule Reject 0 0 80 80, Rule Accept 0 0 0 65535]
+  False @=? exitPolicyAccepts (ip "10.1.2.3") 80
+                              (parse ["reject private:*", "accept *:*"])
+  True @=? exitPolicyAccepts (ip "172.32.0.1") 80
+                             (parse ["reject private:*", "accept *:*"])
+
+ip :: B.ByteString -> HostAddress
+ip = either (error . ($ "")) id . inet_atoh
 
 exitPolicy = do
   let Right [ip1,ip2,ip3] = mapM inet_atoh ips

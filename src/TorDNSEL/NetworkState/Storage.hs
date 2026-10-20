@@ -16,6 +16,8 @@ module TorDNSEL.NetworkState.Storage (
     StorageConfig(..)
   , StorageManager
   , ExitAddress(..)
+  , mkExitAddress
+  , renderExitAddress
   , startStorageManager
   , readExitAddressesFromStorage
   , rebuildExitAddressStorage

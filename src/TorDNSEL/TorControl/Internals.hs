@@ -19,7 +19,7 @@
 -- in asynchronous events that Tor generates when it receives new directory
 -- information.
 --
--- See <https://www.torproject.org/svn/trunk/doc/spec/control-spec.txt> for details.
+-- See <https://spec.torproject.org/control-spec/> for details.
 --
 -----------------------------------------------------------------------------
 
@@ -61,6 +61,8 @@ module TorDNSEL.TorControl.Internals (
   , CloseCircuitFlags(..)
   , emptyCloseCircuitFlags
   , closeCircuit
+  , mapAddress
+  , unmapAddress
   , getConf'
   , setConf'
   , resetConf'
@@ -87,6 +89,7 @@ module TorDNSEL.TorControl.Internals (
   , registerEventHandlers
   , newDescriptorsEvent
   , networkStatusEvent
+  , newConsensusEvent
   , streamEvent
   , circuitEvent
   , lineEvent
@@ -96,6 +99,7 @@ module TorDNSEL.TorControl.Internals (
   , IOMessage(..)
   , startIOManager
   , startSocketReader
+  , c_replies
 
   -- * Data types
   , TorVersion(..)
@@ -465,6 +469,23 @@ closeCircuit (CircId cid) flags conn =
     command = Command (B.pack "closecircuit") (cid : flagArgs) []
     flagArgs = [flag | (p,flag) <- [(ifUnused, B.pack "IfUnused")], p flags]
 
+-- | Send a MAPADDRESS command registering each @(from, to)@ pair. Tor
+-- rewrites SOCKS requests for @from@ to @to@. Unlike a @.exit@ hostname given
+-- directly to the SOCKS port (rejected by Tor since 0.3.x), a @.exit@ address
+-- installed by the controller is honoured. Throw a 'TorControlError' if any
+-- mapping is refused.
+mapAddress :: [(ByteString, ByteString)] -> Connection -> IO ()
+mapAddress pairs conn =
+  sendCommand command False Nothing conn >>= mapM_ (throwIfNotPositive command)
+  where
+    command = Command (B.pack "mapaddress")
+                      [B.concat [from, B.pack "=", to] | (from,to) <- pairs] []
+
+-- | Remove address mappings previously installed with 'mapAddress'. (Mapping
+-- an address to itself removes the mapping.)
+unmapAddress :: [ByteString] -> Connection -> IO ()
+unmapAddress addrs = mapAddress [(a, a) | a <- addrs]
+
 -- | Send a GETCONF command with a set of config variable names, returning
 -- a set of key-value pairs. Throw a 'TorControlError' if the reply code
 -- indicates failure.
@@ -682,6 +703,17 @@ networkStatusEvent handler = EventHandler (B.pack "NS") handleNS
     handleNS (Reply _ _ doc@(_:_):_) = handler (map ParseError es) rs
       where (es,rs) = partitionEither . parseRouterStatuses $ parseDocument doc
     handleNS _ = return ()
+
+-- | Create an event handler for new consensus events. Unlike @NS@ events,
+-- which only carry the entries that changed, a @NEWCONSENSUS@ event carries
+-- the status entry of every router listed in the new consensus.
+newConsensusEvent ::
+  ([TorControlError] -> [RouterStatus] -> IO ()) -> EventHandler
+newConsensusEvent handler = EventHandler (B.pack "NEWCONSENSUS") handleNC
+  where
+    handleNC (Reply _ _ doc@(_:_):_) = handler (map ParseError es) rs
+      where (es,rs) = partitionEither . parseRouterStatuses $ parseDocument doc
+    handleNC _ = return ()
 
 -- | Create an event handler for stream status change events.
 streamEvent :: (Either TorControlError StreamStatus -> IO ()) -> EventHandler

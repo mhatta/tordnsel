@@ -43,12 +43,12 @@ import TorDNSEL.Util
 -- sent.
 data Stats = Stats
   { bytesRecv, bytesSent, dgramsRecv, positives
-  , negatives, others :: !Integer }
+  , negatives, others, httpRequests :: !Integer }
 
 -- | The current statistics state.
 statsState :: MVar Stats
 {-# NOINLINE statsState #-}
-statsState = unsafePerformIO . newMVar $ Stats 0 0 0 0 0 0
+statsState = unsafePerformIO . newMVar $ Stats 0 0 0 0 0 0 0
 
 -- | An internal type for messages sent to the stats server thread.
 data StatsMessage
@@ -153,7 +153,8 @@ renderStats s = B.concat . map line $
   , B.pack "DatagramsReceived " ~> dgramsRecv
   , B.pack "PositivesSent "     ~> positives
   , B.pack "NegativesSent "     ~> negatives
-  , B.pack "OthersSent "        ~> others ]
+  , B.pack "OthersSent "        ~> others
+  , B.pack "HTTPRequests "      ~> httpRequests ]
   where
     line (x,f) = x `B.append` (B.pack . show $ f s) `B.append` B.pack "\r\n"
     (~>) = (,)
@@ -169,6 +170,11 @@ incrementBytes received sent =
     s { bytesRecv  = bytesRecv s + fromIntegral received
       , bytesSent  = bytesSent s + fromIntegral sent
       , dgramsRecv = dgramsRecv s + 1 }
+
+-- | Increment the count of HTTP requests to the web interface.
+incrementHTTPRequests :: IO ()
+incrementHTTPRequests =
+  modifyMVar_ statsState $ \s -> return $! s { httpRequests = httpRequests s + 1 }
 
 -- | Increment the count of DNSEL responses.
 incrementResponses :: ResponseType -> IO ()

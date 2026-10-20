@@ -85,6 +85,7 @@ import TorDNSEL.ExitTest.Request
 import TorDNSEL.Log
 import TorDNSEL.NetworkState.Types
 import TorDNSEL.Socks
+import TorDNSEL.TorControl (TorControlError)
 import TorDNSEL.Util
 
 --------------------------------------------------------------------------------
@@ -115,6 +116,11 @@ data ExitTestInitiatorConfig = ExitTestInitiatorConfig
     -- | A safe wrapper for allocating an exit test cookie.
     eticfWithCookie      :: !(forall a. RouterID -> UTCTime -> Port ->
                               (Cookie -> IO a) -> IO a),
+    -- | Arrange for connections to the hostname passed to the action to exit
+    -- through the given router and reach the given test address. Called with
+    -- the test address, the router and the test's cookie.
+    eticfWithExitMapping :: !(forall a. HostAddress -> RouterID -> Cookie ->
+                              (B.ByteString -> IO a) -> IO a),
     -- | The maximum number of exit test clients to run concurrently.
     eticfConcClientLimit :: !Integer,
     -- | Where Tor is listening for SOCKS connections.
@@ -364,14 +370,19 @@ forkTestClient conf rid published port =
   forkLinkIO $ do
     r <- E.try .
       eticfWithCookie conf rid published port $ \cookie ->
-        timeout connectionTimeout .
-          E.bracket connectToSocksServer hClose $ \handle ->
-            withSocksConnection handle (Addr exitHost) port $ do
-              B.hPut handle $ createRequest testHost port cookie
-              B.hGet handle 1024 -- ignore response
-              return ()
+        eticfWithExitMapping conf (eticfTestAddress conf) rid cookie $
+          \exitHost ->
+            timeout connectionTimeout .
+              E.bracket connectToSocksServer hClose $ \handle ->
+                withSocksConnection handle (Addr exitHost) port $ do
+                  B.hPut handle $ createRequest testHost port cookie
+                  B.hGet handle 1024 -- ignore response
+                  return ()
     case r of
       Left (E.fromException -> Just (e :: SocksError)) -> do
+        log Info "Exit test for router " rid " port " port " failed: " e
+        E.throwIO e
+      Left (E.fromException -> Just (e :: TorControlError)) -> do
         log Info "Exit test for router " rid " port " port " failed: " e
         E.throwIO e
       Left (E.fromException -> Just (e :: E.IOException)) -> do
@@ -386,8 +397,6 @@ forkTestClient conf rid published port =
       _ ->
         log Debug "Exit test client for router " rid " port " port " finished."
   where
-    exitHost = B.concat [ testHost, B.pack ".", encodeBase16RouterID rid
-                        , B.pack ".exit" ]
     testHost = B.pack . inet_htoa . eticfTestAddress $ conf
 
     connectToSocksServer =

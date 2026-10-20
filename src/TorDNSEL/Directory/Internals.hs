@@ -11,10 +11,11 @@
 -- /Internals/: should only be imported by the public module and tests.
 --
 -- Parsing and processing router descriptors, exit policies, and router
--- status entries from the Tor directory protocol, version 2. We only
--- parse information necessary for running the exit list server.
+-- status entries as served by Tor's control port. We only parse information
+-- necessary for running the exit list server.
 --
--- See <https://www.torproject.org/svn/trunk/doc/spec/dir-spec-v2.txt> for details.
+-- See <https://spec.torproject.org/dir-spec/> and
+-- <https://spec.torproject.org/control-spec/> for details.
 --
 -----------------------------------------------------------------------------
 
@@ -42,13 +43,14 @@ module TorDNSEL.Directory.Internals (
   , RuleType(..)
   , parseExitPolicy
   , exitPolicyAccepts
+  , privateNetworks
   ) where
 
 import Control.Monad (when, unless, liftM)
 import Control.Monad.Except (MonadError(throwError))
 import Data.Char
   ( ord, isSpace, isHexDigit, digitToInt, isAscii, isAsciiUpper
-  , isAsciiLower, isAlpha, isDigit )
+  , isAsciiLower, isAlpha, isDigit, toLower )
 import qualified Data.List as L
 import Data.Bits ((.|.), (.&.), shiftL, shiftR)
 import qualified Data.ByteString.Char8 as B
@@ -123,20 +125,35 @@ data RouterStatus = RS
 
 -- | Parse a router status entry. Return the result or 'throwError' in the
 -- monad if the format is invalid.
+--
+-- Both forms of the \"r\" line are accepted: the one used by the control
+-- port and the @ns@ consensus flavour,
+--
+-- > r nickname identity digest YYYY-MM-DD HH:MM:SS address orport dirport
+--
+-- and the one used by the @microdesc@ consensus flavour, which has no
+-- descriptor digest:
+--
+-- > r nickname identity YYYY-MM-DD HH:MM:SS address orport dirport
+--
+-- Since Tor 0.4.8 the publication time in consensus entries is a fixed
+-- placeholder, so it must not be relied upon.
 parseRouterStatus :: MonadError ShowS m => Document -> m RouterStatus
 parseRouterStatus items = do
   (rid,published) <- prependError ("Failed parsing router status entry: " ++)
                                   (parseRouter =<< findArg (B.pack "r") items)
   return $! RS rid published (parseStatus . hush $ findArg (B.pack "s") items)
   where
-    parseRouter router
-      | _:base64RouterID:_:date:time:_ <- B.splitWith isSpace router = do
-        rid <- decodeBase64RouterID base64RouterID
-        published <- parseUTCTime $ B.unwords [date, time]
-        return (rid, published)
-      | otherwise = throwError $ cat "Malformed status "
-                                     (esc maxStatusLen router) '.'
-      where maxStatusLen = 122
+    parseRouter router = case filter (not . B.null) $ B.splitWith isSpace router of
+      [_, base64RouterID, _, date, time, _, _, _] -> go base64RouterID date time
+      [_, base64RouterID, date, time, _, _, _]    -> go base64RouterID date time
+      _ -> throwError $ cat "Malformed status " (esc maxStatusLen router) '.'
+      where
+        maxStatusLen = 160
+        go base64RouterID date time = do
+          rid <- decodeBase64RouterID base64RouterID
+          published <- parseUTCTime $ B.unwords [date, time]
+          return (rid, published)
 
     parseStatus = maybe False (elem (B.pack "Running") . B.splitWith isSpace)
 
@@ -232,21 +249,28 @@ data RuleType
 
 -- | Parse an 'ExitPolicy' from a list of accept or reject items. Return the
 -- result or 'throwError' in the monad if the format is invalid.
+--
+-- Only the IPv4 part of a policy is represented. Rules whose pattern is an
+-- IPv6 address (@[...]@) or @*6@ can never match an IPv4 destination and are
+-- dropped; @private@ is expanded to the networks Tor considers private.
 parseExitPolicy :: MonadError ShowS m => [Item] -> m ExitPolicy
 parseExitPolicy xs = do
   policy <- mapM (prependError ("Failed parsing exit rule: " ++) . parseRule) xs
-  return $! policy
+  return $! concat policy
   where
     parseRule (Item key (Just arg) _)
-      | [addrSpec,portSpec] <- B.split ':' arg = do
+      | (addrSpec',portSpec) <- B.spanEnd (/= ':') arg
+      , Just (addrSpec,':') <- unsnoc addrSpec'
+      , not (B.null portSpec) = do
         ruleType' <- parseRuleType key
-        (address,mask) <- prependError
-          (cat "Malformed address specifier " (esc maxAddrLen addrSpec) ": ")
-          (parseAddrSpec addrSpec)
         (beginPort,endPort) <- prependError
           (cat "Malformed port specifier " (esc maxPortLen portSpec) ": ")
           (parsePortSpec portSpec)
-        return $! Rule ruleType' address mask beginPort endPort
+        nets <- prependError
+          (cat "Malformed address specifier " (esc maxAddrLen addrSpec) ": ")
+          (parseAddrSpec addrSpec)
+        return [ Rule ruleType' address mask beginPort endPort
+               | (address,mask) <- nets ]
     parseRule (Item key arg _) =
       throwError $ cat "Malformed exit rule " (esc maxRuleTypeLen key) ' '
                        (maybe id (esc maxRuleLen) arg) '.'
@@ -258,15 +282,18 @@ parseExitPolicy xs = do
                                      (esc maxRuleTypeLen key) '.'
 
     parseAddrSpec bs
-      | bs == (B.pack "*") = return (0, 0)
+      | bs == B.pack "*" || bs == B.pack "*4" = return [(0, 0)]
+      | bs == B.pack "*6"                     = return []
+      | B.pack "[" `B.isPrefixOf` bs          = return [] -- IPv6 pattern
+      | B.map toLower bs == B.pack "private"  = return privateNetworks
       | [addr,mask] <- B.split '/' bs = do
         addr' <- inet_atoh addr
         mask' <- either (const $ bitsToMask =<< readInt mask) return
                         (inet_atoh mask)
-        return (addr' .&. mask', mask')
+        return [(addr' .&. mask', mask')]
       | otherwise = do
         addr <- inet_atoh bs
-        return (addr, 0xffffffff)
+        return [(addr, 0xffffffff)]
 
     parsePortSpec bs
       | bs == (B.pack "*") = return (0, 65535)
@@ -286,8 +313,19 @@ parseExitPolicy xs = do
 
     maxRuleLen = maxAddrLen + 1 + maxPortLen
     maxRuleTypeLen = 6
-    maxAddrLen = 31
+    maxAddrLen = 64
     maxPortLen = 11
+
+-- | The IPv4 networks Tor's @private@ address pattern expands to, as
+-- (address, mask) pairs.
+privateNetworks :: [(HostAddress, HostAddress)]
+privateNetworks =
+  [ (0x00000000, 0xff000000)   -- 0.0.0.0/8
+  , (0xa9fe0000, 0xffff0000)   -- 169.254.0.0/16
+  , (0x7f000000, 0xff000000)   -- 127.0.0.0/8
+  , (0xc0a80000, 0xffff0000)   -- 192.168.0.0/16
+  , (0x0a000000, 0xff000000)   -- 10.0.0.0/8
+  , (0xac100000, 0xfff00000) ] -- 172.16.0.0/12
 
 -- | Return whether the exit policy allows an exit connection to the given IPv4
 -- address and port. The first matching rule determines the result. If no rule

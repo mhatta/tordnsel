@@ -21,6 +21,7 @@ module TorDNSEL.Util (
     readInt
   , readInteger
   , inet_atoh
+  , inet_atoh6
   , parseUTCTime
   , parseLocalTime
   , parseQuotedString
@@ -117,7 +118,8 @@ import qualified Control.Monad.State as State
 import Control.Monad.State (MonadState)
 import Data.Bits ((.&.), (.|.), shiftL, shiftR)
 import Data.Char
-  (intToDigit, showLitChar, isPrint, isControl, chr, ord, digitToInt, isAscii)
+  ( intToDigit, showLitChar, isPrint, isControl, chr, ord, digitToInt, isAscii
+  , isHexDigit )
 import qualified Data.List as L
 import Data.List (intersperse)
 import qualified Data.ByteString.Char8 as B
@@ -131,7 +133,7 @@ import Data.Time
   , timeOfDayToTime, timeToTimeOfDay )
 import Data.Word (Word16, Word32)
 import Network.Socket
-  ( HostAddress, ProtocolNumber, Socket, SockAddr(..), SocketOption(ReuseAddr, IPv6Only)
+  ( HostAddress, HostAddress6, ProtocolNumber, Socket, SockAddr(..), SocketOption(ReuseAddr, IPv6Only)
   , SocketType(Datagram, Stream), Family(AF_INET, AF_INET6, AF_UNIX), socket, bind
   , listen, setSocketOption, close, maxListenQueue )
 import System.Directory (doesFileExist, removeFile)
@@ -178,6 +180,47 @@ inet_atoh bs
   = return . L.foldl' (.|.) 0 . zipWith shiftL (map fromIntegral os) $ [24,16..]
 inet_atoh bs = throwError $ cat "Malformed IP address " (esc maxAddrLen bs) '.'
   where maxAddrLen = 15
+
+-- | Convert an IPv6 address in RFC 4291 text form (e.g. @2001:db8::1@ or
+-- @::ffff:192.0.2.1@) to a 'HostAddress6'. Return the result or 'throwError'
+-- in the monad if the format is invalid.
+inet_atoh6 :: MonadError ShowS m => ByteString -> m HostAddress6
+inet_atoh6 bs = maybe failure return $ do
+  groups <- case B.breakSubstring (B.pack "::") bs of
+    (front,rest)
+      | B.null rest -> do
+          gs <- parseGroups front
+          guard $ length gs == 8
+          return gs
+      | otherwise -> do
+          let back = B.drop 2 rest
+          guard . B.null . snd $ B.breakSubstring (B.pack "::") back
+          fs <- if B.null front then return [] else parseGroups front
+          bs' <- if B.null back then return [] else parseGroups back
+          let missing = 8 - length fs - length bs'
+          guard $ missing >= 1
+          return $ fs ++ replicate missing 0 ++ bs'
+  case groups of
+    [a,b,c,d,e,f,g,h] -> return (w a b, w c d, w e f, w g h)
+    _                 -> Nothing
+  where
+    failure = throwError $ cat "Malformed IPv6 address " (esc 45 bs) '.'
+    w :: Word32 -> Word32 -> Word32
+    w hi lo = hi `shiftL` 16 .|. lo
+    parseGroups s = do
+      let parts = B.split ':' s
+      (initParts,lastPart) <- unsnocList parts
+      hexes <- mapM hexGroup initParts
+      lastGroups <- case hush (inet_atoh lastPart) of
+        Just v4 | B.elem '.' lastPart -> return [v4 `shiftR` 16, v4 .&. 0xffff]
+        _ -> (:[]) `fmap` hexGroup lastPart
+      return $ hexes ++ lastGroups
+    hexGroup g = do
+      guard $ not (B.null g) && B.length g <= 4 && B.all isHexDigit g
+      return . L.foldl' (\acc c -> acc * 16 + fromIntegral (digitToInt c)) 0
+             $ B.unpack g
+    unsnocList [] = Nothing
+    unsnocList xs = Just (init xs, last xs)
 
 -- | Parse a UTCTime in this format: \"YYYY-MM-DD HH:MM:SS\".
 parseUTCTime :: MonadError ShowS m => ByteString -> m UTCTime

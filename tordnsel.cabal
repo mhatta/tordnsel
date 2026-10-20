@@ -17,6 +17,7 @@ category:        Network
 build-type:      Simple
 tested-with:     GHC == 9.4.7, GHC == 9.10.3
 extra-doc-files: README, ChangeLog, TODO, doc/torel-design.txt
+extra-source-files: tests/data/*.txt
 data-files:      config/tordnsel.conf.sample, contrib/cacti-input.pl,
                  contrib/tordnsel-init.d-script.sample, doc/tordnsel.8
 
@@ -44,7 +45,7 @@ common shared
                       bytestring    >= 0.11 && < 0.13,
                       conduit       >= 1.3  && < 1.4,
                       conduit-extra >= 1.3  && < 1.4,
-                      containers    >= 0.6  && < 0.8,
+                      containers    >= 0.6  && < 0.9,
                       deepseq       >= 1.4  && < 1.6,
                       directory     >= 1.3  && < 1.4,
                       mtl           >= 2.2  && < 2.4,
@@ -76,6 +77,7 @@ library
                     TorDNSEL.DNS.Server
                     TorDNSEL.DNS.Server.Internals
                     TorDNSEL.Document
+                    TorDNSEL.ExitList
                     TorDNSEL.ExitTest.Initiator
                     TorDNSEL.ExitTest.Initiator.Internals
                     TorDNSEL.ExitTest.Request
@@ -97,6 +99,8 @@ library
                     TorDNSEL.TorControl
                     TorDNSEL.TorControl.Internals
                     TorDNSEL.Util
+                    TorDNSEL.Web
+                    TorDNSEL.Web.Internals
 
 executable tordnsel
   import:           shared
@@ -114,6 +118,10 @@ test-suite runtests
                     TorDNSEL.Directory.Tests
                     TorDNSEL.DNS.Tests
                     TorDNSEL.DNS.Server.Tests
+                    TorDNSEL.ExitList.Tests
+                    TorDNSEL.Fixtures
+                    TorDNSEL.TorControl.Tests
+                    TorDNSEL.Web.Tests
   build-depends:    tordnsel,
                     HUnit >= 1.6 && < 1.7
-  ghc-options:      -threaded
+  ghc-options:      -threaded -Wno-missing-signatures

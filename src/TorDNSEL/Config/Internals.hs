@@ -1,5 +1,3 @@
-{-# OPTIONS_GHC -fno-warn-incomplete-patterns #-}
-
 -----------------------------------------------------------------------------
 -- |
 -- Module      : TorDNSEL.Config.Internals
@@ -26,6 +24,7 @@ module TorDNSEL.Config.Internals (
   , parseConfigArgs
   , knownConfigItems
   , makeConfig
+  , multiValuedConfigItems
   , staticConfigOptionsChanged
   , copyStaticConfigOptions
   , toItem
@@ -54,12 +53,14 @@ import Data.Char (isSpace, toLower)
 import Data.Maybe (catMaybes)
 import qualified Data.ByteString.Char8 as B
 import Data.ByteString (ByteString)
+import qualified Data.List as L
 import qualified Data.Map as M
 import Data.Map (Map)
 import qualified Data.Set as S
 import Data.Set (Set)
 import Network.Socket
-  ( Socket, HostAddress, SockAddr(SockAddrInet, SockAddrUnix), Family(AF_UNIX)
+  ( Socket, HostAddress, SockAddr(SockAddrInet, SockAddrInet6, SockAddrUnix)
+  , Family(AF_UNIX)
   , SocketType(Stream), socket, connect, accept, socketToHandle )
 import System.IO (IOMode(ReadWriteMode), hClose)
 import System.Posix.Files (setOwnerAndGroup)
@@ -68,6 +69,7 @@ import System.Posix.Types (UserID)
 import TorDNSEL.Control.Concurrent.Link
 import TorDNSEL.Control.Concurrent.Util
 import TorDNSEL.DNS
+import TorDNSEL.ExitList
 import TorDNSEL.Log
 import TorDNSEL.Util
 
@@ -96,6 +98,13 @@ data Config = Config
   , cfGroup               :: Maybe String -- ^ Group name to run under.
   , cfChangeRootDirectory :: Maybe FilePath -- ^ Directory to chroot to.
   , cfPIDFile             :: Maybe FilePath -- ^ Where to record our PID.
+    -- | Named destination lists for \"list\" queries (query type 2).
+  , cfExitLists           :: NamedLists
+    -- | Address to bind the web interface's HTTP listener, if enabled.
+  , cfHTTPListenAddress   :: Maybe SockAddr
+    -- | The public address and port at which clients reach the web
+    -- interface, if it differs from the listening address (e.g. behind NAT).
+  , cfHTTPPublicAddress   :: Maybe (HostAddress, Port)
   } deriving Show
 
 -- | Exit test configuration options.
@@ -129,7 +138,15 @@ knownConfigItems
   , "User"
   , "Group"
   , "ChangeRootDirectory"
-  , "PIDFile" ]
+  , "PIDFile"
+  , "ExitList"
+  , "HTTPListenAddress"
+  , "HTTPPublicAddress" ]
+
+-- | Config items that may be given more than once. Their values are joined
+-- with newlines.
+multiValuedConfigItems :: Set ByteString
+multiValuedConfigItems = S.fromList . map toItem $ [ "ExitList" ]
 
 -- | Merge in default config options, check for missing options, and parse
 -- individual config values.
@@ -153,7 +170,10 @@ makeConfig conf =
     "User" `app`
     "Group" `app`
     "ChangeRootDirectory" `app`
-    "PIDFile"
+    "PIDFile" `app`
+    "ExitList" `app`
+    "HTTPListenAddress" `app`
+    "HTTPPublicAddress"
   where
     conf' = M.union conf . M.fromList . map (toItem *** toItem) $
       [ "DNSListenAddress"    ~> "127.0.0.1:53"
@@ -255,8 +275,35 @@ instance ConfigValue SockAddr where
           addr' <- inet_atoh addr
           Port port' <- parsePort port
           return $! SockAddrInet (fromIntegral port') (htonl addr')
+        -- An IPv6 address in brackets, e.g. [::1]:53
+        _ | B.pack "[" `B.isPrefixOf` val
+          , (addr,rest) <- B.break (== ']') (B.drop 1 val)
+          , Just port <- B.stripPrefix (B.pack "]:") rest -> do
+              addr' <- inet_atoh6 addr
+              Port port' <- parsePort port
+              return $! SockAddrInet6 (fromIntegral port') 0 addr' 0
         _ -> throwError $ cat "Malformed address/port " (esc maxAddrLen val) '.'
-    where maxAddrLen = 32
+    where maxAddrLen = 64
+
+instance ConfigValue (HostAddress, Port) where
+  parse item conf = do
+    val <- lookupValue item conf
+    prependOnFail item $
+      case B.split ':' val of
+        [addr,port] -> liftM2 (,) (inet_atoh addr) (parsePort port)
+        _ -> throwError $ cat "Malformed address/port " (esc 32 val) '.'
+
+-- | Named exit lists, one per (newline-separated) @ExitList@ value. The
+-- option is optional: no lists means \"list\" queries are disabled.
+instance ConfigValue NamedLists where
+  parse item conf = case M.lookup (B.map toLower item) conf of
+    Nothing -> return M.empty
+    Just val -> prependOnFail item $ do
+      lists <- mapM parseNamedList . filter (not . B.null) $ B.lines val
+      let dup = [n | (n,k) <- M.toList (M.fromListWith (+) [(n,1::Int) | (n,_) <- lists]), k > 1]
+      case dup of
+        n:_ -> throwError $ cat "Exit list " (esc 64 n) " is defined twice."
+        []  -> return $! M.fromList lists
 
 instance ConfigValue (HostAddress, [Port]) where
   parse item conf = do
@@ -313,7 +360,7 @@ instance ConfigValue DomainName where
 -- | Parse a config file, skipping comments. 'throwError' in the monad if an
 -- unknown config item is present.
 parseConfigFile :: MonadError ShowS m => ByteString -> m ConfigMap
-parseConfigFile = liftM (M.fromList . catMaybes) . mapM parseLine . B.lines
+parseConfigFile = liftM (fromConfigList . catMaybes) . mapM parseLine . B.lines
   where
     parseLine line
       | B.null line' = return Nothing
@@ -330,11 +377,14 @@ parseConfigFile = liftM (M.fromList . catMaybes) . mapM parseLine . B.lines
 -- option. 'throwError' in the monad if an unknown item was provided.
 parseConfigArgs :: MonadError ShowS m => [String] -> m ConfigMap
 parseConfigArgs =
-  liftM M.fromList . mapM parseArg . splitPairs . filter notVerifyConfig
+  liftM fromConfigList . mapM parseArg . splitPairs . filter notVerifyConfig
   where
     notVerifyConfig arg = map toLower arg /= "--verify-config"
     parseArg ["-f",option] = return (B.pack "configfile", B.pack option)
-    parseArg [item,option]
+    parseArg [item,option] = parseItem item option
+    parseArg args = throwError $ cat "Malformed command line arguments "
+                                     (esc 128 . B.pack $ unwords args) '.'
+    parseItem item option
       | S.member lcItem knownConfigItems = return (lcItem, B.pack option)
       | otherwise = throwError $ cat "Unknown config option "
                                      (esc maxOptionLen $ B.pack item') '.'
@@ -345,6 +395,17 @@ parseConfigArgs =
     splitPairs = takeWhile isPair . map (take 2) . iterate (drop 2)
     isPair [_,_] = True
     isPair _     = False
+
+-- | Build a 'ConfigMap' from (item, value) pairs in order of appearance.
+-- Later values of an ordinary item replace earlier ones; the values of
+-- 'multiValuedConfigItems' accumulate, separated by newlines.
+fromConfigList :: [(ByteString, ByteString)] -> ConfigMap
+fromConfigList = L.foldl' insert M.empty
+  where
+    insert m (k,v)
+      | k `S.member` multiValuedConfigItems =
+          M.insertWith (\new old -> B.concat [old, B.pack "\n", new]) k v m
+      | otherwise = M.insert k v m
 
 -- | Canonicalize a config item.
 toItem :: String -> ByteString
@@ -437,7 +498,13 @@ handleMessage s (NewClient client signal) = do
   E.handle
     (\(e :: E.IOException) -> log Warn "Reading config from reconfigure socket failed: " e) $
     E.bracket (socketToHandle client ReadWriteMode) hClose $ \handle -> do
-      str <- B.hGetContents handle
+      -- B.hGetContents would close the (duplex) handle, and we still need
+      -- to write a response, so read up to EOF without closing it.
+      let readAll acc = do
+            chunk <- B.hGetSome handle 4096
+            if B.null chunk then return (B.concat $ reverse acc)
+                            else readAll (chunk : acc)
+      str <- readAll []
       case parseConfigFile str >>= makeConfig of
         Left e -> do
           hCat handle "Parse error: " e "\r\n"

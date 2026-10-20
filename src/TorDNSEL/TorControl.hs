@@ -14,7 +14,7 @@
 -- in asynchronous events that Tor generates when it receives new information
 -- from directories.
 --
--- See <https://www.torproject.org/svn/trunk/doc/spec/control-spec.txt> for details.
+-- See <https://spec.torproject.org/control-spec/> for details.
 --
 -----------------------------------------------------------------------------
 
@@ -42,6 +42,8 @@ module TorDNSEL.TorControl (
   , CloseCircuitFlags(..)
   , emptyCloseCircuitFlags
   , closeCircuit
+  , mapAddress
+  , unmapAddress
 
   -- ** Config variables
   , ConfVar
@@ -59,6 +61,7 @@ module TorDNSEL.TorControl (
   , registerEventHandlers
   , newDescriptorsEvent
   , networkStatusEvent
+  , newConsensusEvent
   , streamEvent
   , circuitEvent
   , addressMapEvent
