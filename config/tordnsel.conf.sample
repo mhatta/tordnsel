@@ -1,4 +1,4 @@
-## torndsel.conf.sample
+## tordnsel.conf.sample
 ## Sample configuration file for TorDNSEL.
 
 ################ Required options #########################################
@@ -8,7 +8,9 @@
 
 ## Answer queries authoritatively for this DNS zone. For example, if this
 ## is set to "exitlist.example.com.", your server would accept queries of
-## the form "1.0.0.10.80.4.3.2.1.ip-port.exitlist.example.com.".
+## the form "1.0.0.10.80.4.3.2.1.ip-port.exitlist.example.com.",
+## "4.3.2.1.examplenet.list.exitlist.example.com." and
+## "4.3.2.1.80.me.exitlist.example.com.".
 #ZoneOfAuthority exitlist.example.com.
 
 ## This name server's own domain name, for use in NS and SOA records.
@@ -37,9 +39,9 @@
 ## these.
 
 ## Bind the name server to this IP address and UDP port. If you want to
-## bind to all interfaces, you might set the address to "0.0.0.0". This
-## port is bound before dropping privileges. Leave it commented to use the
-## default.
+## bind to all interfaces, you might set the address to "0.0.0.0"; IPv6
+## addresses go in brackets, e.g. "[::]:53". This port is bound before
+## dropping privileges. Leave it commented to use the default.
 #DNSListenAddress 127.0.0.1:53
 
 ## The IP address that will be returned in response to requests for the A
@@ -53,7 +55,9 @@
 #TorControlAddress 127.0.0.1:9051
 
 ## The password you used to generate the HashedControlPassword in Tor's
-## torrc. This is only required when you have a HashedControlPassword.
+## torrc. This is only required when you have a HashedControlPassword. With
+## "CookieAuthentication 1" in the torrc, the cookie file is found through
+## PROTOCOLINFO and needs to be readable by the TorDNSEL user.
 #TorControlPassword password
 
 ## Send log messages of at least a minimum severity to a specified stream,
@@ -86,6 +90,29 @@
 ## Write our PID to the specified file before chrooting or dropping
 ## privileges. This file won't be removed on exit.
 #PIDFile /srv/tordnsel/run/tordnsel.pid
+
+## Named lists of destinations for "list" queries (query type 2 of the
+## design): "{IP}.{listname}.list.{zone}" is listed iff {IP} is a Tor exit
+## that permits connections to any member of the list. Each pattern is
+## ADDRESS[/BITS]:PORT[-PORT][,PORT[-PORT]...]; masks wider than /8 are
+## refused. Repeat the option to define several lists.
+#ExitList examplenet 192.0.2.10:6667,6697 198.51.100.0/24:6660-6669
+#ExitList mail 203.0.113.25:25,465,587
+
+################ HTTP interface ###########################################
+##
+## The web interface provides the same data as the DNS interface:
+##   /api/v1/ip-port?ip=IP1&port=PORT&dest=IP2  /api/v1/list?ip=IP&list=NAME
+##   /api/v1/me?ip=IP&port=PORT  /api/ip  /torbulkexitlist  /exit-addresses
+
+## Serve HTTP on this address and TCP port. It is bound before dropping
+## privileges. The interface is disabled unless this is set.
+#HTTPListenAddress 127.0.0.1:8080
+
+## The address and port at which clients reach the HTTP interface, if
+## different from HTTPListenAddress (behind NAT or a port redirection).
+## /api/ip uses it to check whether an exit can reach us.
+#HTTPPublicAddress 10.0.0.1:80
 
 ################ Active testing options ###################################
 ##

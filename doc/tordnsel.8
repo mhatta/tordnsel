@@ -1,4 +1,4 @@
-.TH TORDNSEL 8 "28 February 2008" "TORDNSEL"
+.TH TORDNSEL 8 "20 October 2026" "TORDNSEL 0.2.0"
 
 .SH NAME
 tordnsel \- an active-testing, DNS-based list of Tor exit IP addresses
@@ -14,7 +14,7 @@ to operators of Internet services, such as web sites and IRC networks, who want
 to detect anonymous clients and treat them differently from non-anonymous
 clients. Since not every Tor exit allows connections to the entire Internet,
 \fBtordnsel\fR extends the DNSBL interface to require specifying the service's
-IP address and port in queries.
+IP address and port in queries. The same information is available over HTTP.
 .PP
 \fBtordnsel\fR runs alongside a local \fBtor\fR client, to which it establishes
 a persistent controller connection. The \fBtor\fR process fetches up-to-date Tor
@@ -27,6 +27,64 @@ allows it to detect exits configured to send outbound connections through a
 different IP address from the one they advertise in the directory. When
 configured to run active tests, \fBtordnsel\fR tests through a particular exit
 each time it publishes a new descriptor.
+
+.SH DNS INTERFACE
+Assume \fBZoneOfAuthority\fR is "exitlist.example.com". Addresses in query
+names are written in reverse, as in other DNSBLs. A listed name has an A record
+of 127.0.0.2 and a TXT record explaining the listing; an unlisted name doesn't
+exist (NXDOMAIN). 127.0.0.2 is always listed, for testing.
+.TP
+\fB{IP1}.{port}.{IP2}.ip-port.\fR\fIzone\fP
+Listed iff there is a Tor exit at \fIIP1\fR that permits connections to
+\fIport\fR on \fIIP2\fR. For example,
+"1.0.0.10.80.4.3.2.1.ip-port.exitlist.example.com" asks whether 10.0.0.1 is a
+Tor exit permitting connections to 1.2.3.4:80.
+.TP
+\fB{IP}.{listname}.list.\fR\fIzone\fP
+Listed iff \fIIP\fR is a Tor exit that permits connections to any member of the
+list \fIlistname\fR, defined with \fBExitList\fR.
+.TP
+\fB{IP}.{port}.me.\fR\fIzone\fP
+Listed iff \fIIP\fR is a Tor exit that permits connections to \fIport\fR on
+the host that sent the query. Note that if the query comes through a recursive
+resolver, that resolver is the host in question. Answers have a TTL of zero so
+that resolvers don't hand them to other clients.
+.PP
+Other answers are cached for 30 minutes. EDNS(0) is supported.
+
+.SH HTTP INTERFACE
+When \fBHTTPListenAddress\fR is set, the same data is available over HTTP
+(GET and HEAD only; put a reverse proxy in front for TLS):
+.TP
+\fB/api/v1/ip-port?ip=\fR\fIIP1\fR\fB&port=\fR\fIPORT\fR\fB&dest=\fR\fIIP2\fP
+JSON answer to the "ip-port" query.
+.TP
+\fB/api/v1/list?ip=\fR\fIIP\fR\fB&list=\fR\fINAME\fP and \fB/api/v1/lists\fP
+JSON answer to the "list" query, and the configured lists.
+.TP
+\fB/api/v1/me?ip=\fR\fIIP\fR\fB&port=\fR\fIPORT\fP
+JSON answer to the "me" query, where the destination is the HTTP client.
+.TP
+\fB/api/ip\fP
+Whether the HTTP client connects from a Tor exit able to reach this server, in
+the format of check.torproject.org's /api/ip.
+.TP
+\fB/torbulkexitlist\fR[\fB?ip=\fR\fIIP\fR[\fB&port=\fR\fIPORT\fR]]\fP
+All addresses of Tor exits permitting connections to \fIIP\fR:\fIPORT\fR (port 80
+by default), or of all exits, one per line.
+.TP
+\fB/exit-addresses\fP
+The results of active exit tests.
+
+.SH TOR CONFIGURATION
+\fBtordnsel\fR needs a \fBtor\fR client with a \fBControlPort\fR (and, for
+active testing, a \fBSocksPort\fR). Cookie and hashed password authentication
+are supported. \fBtordnsel\fR sets \fBFetchUselessDescriptors\fR and
+\fBFetchDirInfoEarly\fR for the lifetime of its connection, so that \fBtor\fR
+downloads every router descriptor; their original values are restored when
+\fBtordnsel\fR disconnects. Active tests are routed through particular exits with
+controller address mappings (MAPADDRESS to "\fIaddress\fR.\fIfingerprint\fR.exit"),
+since \fBtor\fR no longer accepts .exit hostnames on its SOCKS port.
 
 .SH OPTIONS
 .TP
@@ -82,8 +140,9 @@ unspecified:
 .TP
 \fBDNSListenAddress \fR\fIIPADDR\fR:\fIPORT\fP
 Bind the name server to this IP address and UDP port. If you want to bind to all
-interfaces, set \fIIPADDR\fR to "0.0.0.0". This port is bound before dropping
-privileges. (Default: 127.0.0.1:53)
+interfaces, set \fIIPADDR\fR to "0.0.0.0". IPv6 addresses are written in
+brackets, e.g. "[::]:53". This port is bound before dropping privileges.
+(Default: 127.0.0.1:53)
 .TP
 \fBAddress \fR\fIIPADDR\fP
 Return \fIIPADDR\fR in response to requests for the A record matching the
@@ -128,6 +187,22 @@ the process to \fIDIRECTORY\fP. (Default: none)
 \fBPIDFile \fR\fIFILE\fP
 On startup, write our PID to \fIFILE\fP. \fIFILE\fP won't be removed on exit.
 (Default: none)
+.TP
+\fBExitList \fR\fINAME\fR \fIPATTERN\fR [\fIPATTERN\fR...]\fP
+Define the list \fINAME\fR for "list" queries. Each \fIPATTERN\fR is
+\fIIPADDR\fR[/\fIBITS\fR]:\fIPORT\fR[-\fIPORT\fR][,\fIPORT\fR[-\fIPORT\fR]...].
+Network masks wider than /8 are refused. List names are case-insensitive and
+may contain letters, digits and hyphens. This option may be given several times
+to define several lists. (Default: none)
+.TP
+\fBHTTPListenAddress \fR\fIIPADDR\fR:\fIPORT\fP
+Serve the HTTP interface on this TCP address. The port is bound before dropping
+privileges. (Default: none, the HTTP interface is disabled)
+.TP
+\fBHTTPPublicAddress \fR\fIIPADDR\fR:\fIPORT\fP
+The IPv4 address and port at which clients reach the HTTP interface, if it
+differs from \fBHTTPListenAddress\fR (e.g. behind NAT or a port redirection).
+Used by /api/ip. (Default: the address of the listening socket)
 
 .SH ACTIVE TESTING OPTIONS
 The following options are only necessary if active testing through Tor exits
@@ -222,10 +297,11 @@ failed.
 An unspecified internal error occurred.
 .TP
 \fBEX_OSERR\fR (\fB71\fR)
-Opening a listening socket failed.
+Opening a listening socket (DNS, HTTP or exit test) failed.
 .TP
 \fBEX_OSFILE\fR (\fB72\fR)
-A random number device couldn't be opened, or the UID/GID couldn't be looked up.
+The random number device couldn't be opened, or the UID/GID couldn't be looked
+up.
 .TP
 \fBEX_CANTCREAT\fR (\fB73\fR)
 Preparing a directory, opening the PID file, or binding a Unix domain socket
@@ -253,13 +329,19 @@ running as root. Reopening a listener failed due to a permission error.
 .PP
 .B https://www.torproject.org/
 .PP
-.B https://www.torproject.org/svn/trunk/doc/contrib/torel-design.txt
+.B doc/torel-design.txt in the TorDNSEL source distribution
+.PP
+.B https://github.com/mhatta/tordnsel
 
 .SH CAVEATS
-Active testing puts an excessive load on the local \fBtor\fR process and the Tor
-network because \fBtor\fR builds 4-hop circuits for test connections. Also, if a
+Active testing puts a load on the local \fBtor\fR process and the Tor network
+because \fBtor\fR builds a separate circuit to every exit tested. Also, if a
 particular exit is down, \fBtor\fR will keep building and failing new circuits
 until a timeout occurs.
+.PP
+Only IPv4 is covered: exits' IPv6 addresses aren't listed, and a "me" query
+or /api/ip request from an IPv6 host is never listed.
 
 .SH AUTHORS
-tup <tup.tuple@googlemail.com>
+tup <tup.tuple@googlemail.com>. Maintained by Masayuki Hatta
+<mhatta@mhatta.org>.

@@ -1,0 +1,5 @@
+${include:relay-non-exit.tmpl}
+${include:exit-v4.i}
+# Make exit connections originate from a chosen address, which may differ
+# from the advertised one (this is what TorDNSEL's active testing detects).
+OutboundBindAddressExit $exit_bind

@@ -1,3 +1,47 @@
+0.2.0 - 2026-10-20
+  o Building:
+    - Port to GHC 9.4 and newer (tested with 9.4.7 and 9.10.3) and current
+      libraries (mtl 2.3, network 3, conduit 1.3, unix 2.8, binary 0.8). The
+      code base targeted GHC 7.6.
+    - Modern cabal file (library, executable, test suite); GitHub Actions CI
+      over GHC 9.4 - 9.14, Ubuntu's own Haskell packages, and an end-to-end
+      test against a private Tor network built with chutney.
+    - Drop the libcrypto dependency: random bytes come from the kernel's
+      CSPRNG device, opened before chroot.
+    - Link with the threaded RTS, which uses epoll/kqueue; the select(2)
+      FD_SETSIZE cap on file descriptors no longer applies.
+
+  o Tor compatibility (tested with Tor 0.4.9.6):
+    - Active exit tests work again. Tor refuses .exit hostnames on its SOCKS
+      port since 0.3.x, so every test failed; tests now install a MAPADDRESS
+      mapping to ADDRESS.FINGERPRINT.exit through the controller.
+    - Follow NEWCONSENSUS events instead of NS events. Since Tor 0.4.8 NS
+      events may never mention stable relays again, so they were dropped from
+      our view after 24 hours.
+    - Parse both forms of router status entries and the current descriptor
+      and exit policy syntax ("private", IPv6 rules, *4/*6).
+
+  o New features (doc/torel-design.txt):
+    - Query type 2, "{IP}.{listname}.list.{zone}", with lists defined by the
+      new ExitList option.
+    - Query type 3, "{IP}.{port}.me.{zone}", answered with a TTL of 0.
+    - A web interface (HTTPListenAddress, HTTPPublicAddress) with JSON
+      endpoints for every query type, /api/ip, /torbulkexitlist and
+      /exit-addresses.
+
+  o DNS:
+    - Support EDNS(0) (OPT echo, BADVERS) and answer TXT queries with an
+      explanation of the listing (RFC 5782).
+    - Answer prefixes of valid query names with NOERROR/NODATA, which keeps
+      resolvers using QNAME minimisation working.
+    - IPv6 listen addresses ("[::]:53"); queries from IPv6 hosts.
+    - Don't crash the decoder on unknown opcodes or response codes.
+
+  o Bug fixes:
+    - --reconfigure works again with network 3 and current bytestring.
+    - Malformed values of optional config options are reported instead of
+      being silently ignored.
+
 0.1.1 - 2011-06-28
   - Correctly label the release version and Changelog.
   - Add updated website and maintainers in tordnsel.cabal.

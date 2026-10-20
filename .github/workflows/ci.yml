@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  schedule:
+    # Catch breakage from new library releases.
+    - cron: '17 4 * * 1'
+
+jobs:
+  build:
+    name: GHC ${{ matrix.ghc }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ghc: ['9.4', '9.6', '9.8', '9.10', '9.12', '9.14']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: haskell-actions/setup@v2
+        id: setup
+        with:
+          ghc-version: ${{ matrix.ghc }}
+          cabal-version: latest
+      - name: Configure
+        run: |
+          cabal update
+          cabal configure --enable-tests
+          cabal build all --dry-run
+      - uses: actions/cache@v4
+        with:
+          path: ${{ steps.setup.outputs.cabal-store }}
+          key: cabal-${{ runner.os }}-${{ matrix.ghc }}-${{ hashFiles('dist-newstyle/cache/plan.json') }}
+          restore-keys: cabal-${{ runner.os }}-${{ matrix.ghc }}-
+      - name: Build
+        run: cabal build all
+      - name: Test
+        run: cabal test all --test-show-details=direct
+      - name: Check the package
+        run: cabal check
+
+  distro:
+    # Build with nothing but Ubuntu's Haskell packages, the way a
+    # distribution package would be built.
+    name: Ubuntu packages (Setup.hs)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ghc libghc-network-dev libghc-conduit-dev \
+            libghc-conduit-extra-dev libghc-hunit-dev
+      - name: Build and test
+        run: |
+          runhaskell Setup.hs configure --enable-tests --user
+          runhaskell Setup.hs build
+          runhaskell Setup.hs test
+
+  integration:
+    # End-to-end test against a private Tor network (see tests/integration).
+    name: Integration (chutney)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: torproject/chutney
+          path: chutney
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tor bind9-dnsutils curl ghc \
+            libghc-network-dev libghc-conduit-dev libghc-conduit-extra-dev \
+            libghc-hunit-dev
+          sudo systemctl stop tor || true
+          python3 -m pip install --user pyasyncore pyasynchat || true
+      - name: Build
+        run: |
+          runhaskell Setup.hs configure --user
+          runhaskell Setup.hs build
+      - name: Run
+        run: SUDO=sudo tests/integration/run.sh chutney dist/build/tordnsel/tordnsel

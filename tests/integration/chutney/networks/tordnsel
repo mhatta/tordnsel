@@ -1,0 +1,25 @@
+# A small Tor test network for TorDNSEL's integration test.
+#
+# - 4 directory authorities on 127.0.0.1 (not exits)
+# - exit A advertises 10.200.0.11 and exits from 10.200.0.11
+# - exit B advertises 10.200.0.12 but exits from 10.200.0.99, which only
+#   active testing can discover
+# - exit C advertises 10.200.0.13, exits from it, and only permits
+#   connections to 10.200.0.0/16:6667 and *:443
+# - a client whose control and SOCKS ports TorDNSEL uses
+#
+# The 10.200.0.0/24 addresses must be configured on the loopback interface
+# (see ../run.sh): Tor never binds outgoing exit connections to a source
+# address when the destination is in 127.0.0.0/8.
+Authority = Node(tag="a", authority=1, relay=1, torrc="authority.tmpl")
+ExitA = Node(tag="ea", relay=1, exit=1, torrc="tordnsel-exit.tmpl",
+             ip="10.200.0.11", exit_bind="10.200.0.11")
+ExitB = Node(tag="eb", relay=1, exit=1, torrc="tordnsel-exit.tmpl",
+             ip="10.200.0.12", exit_bind="10.200.0.99")
+ExitC = Node(tag="ec", relay=1, exit=1, torrc="tordnsel-exit-restricted.tmpl",
+             ip="10.200.0.13", exit_bind="10.200.0.13")
+Client = Node(tag="c", client=1, torrc="tordnsel-client.tmpl")
+
+NODES = Authority.getN(4) + [ExitA, ExitB, ExitC] + Client.getN(1)
+
+ConfigureNodes(NODES)

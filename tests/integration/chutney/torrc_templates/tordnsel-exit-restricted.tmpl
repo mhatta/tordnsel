@@ -1,0 +1,7 @@
+${include:relay-non-exit.tmpl}
+ExitRelay 1
+ExitPolicyRejectPrivate 0
+ExitPolicy accept 10.200.0.0/16:6667
+ExitPolicy accept *:443
+ExitPolicy reject *:*
+OutboundBindAddressExit $exit_bind

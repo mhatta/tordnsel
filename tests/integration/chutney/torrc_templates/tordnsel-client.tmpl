@@ -1,0 +1,5 @@
+${include:common.i}
+SocksPort $socksport
+# TorDNSEL turns on FetchUselessDescriptors itself while it is connected;
+# turning it on here as well makes the client fetch descriptors from the start.
+FetchUselessDescriptors 1

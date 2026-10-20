@@ -6,7 +6,7 @@ description:
   TorDNSEL implements a design for a DNSBL-style interface for detecting
   connections exiting the Tor network. This design and its rationale is
   described in doc/torel-design.txt.
-license:         NONE
+license:         LicenseRef-PublicDomain
 license-file:    LICENSE
 homepage:        https://github.com/mhatta/tordnsel
 bug-reports:     https://github.com/mhatta/tordnsel/issues
@@ -61,7 +61,7 @@ common shared
 library
   import:           shared
   hs-source-dirs:   src
-  ghc-options:      -O2 -funbox-strict-fields
+  ghc-options:      -funbox-strict-fields
   cpp-options:      -DVERSION="0.2.0"
   exposed-modules:  TorDNSEL.Config
                     TorDNSEL.Config.Internals
