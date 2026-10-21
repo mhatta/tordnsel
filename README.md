@@ -1,128 +1,158 @@
-TorDNSEL: A Tor DNS-based Exit List
+# TorDNSEL: A Tor DNS-based Exit List
 
 TorDNSEL answers, over DNS and HTTP, the question "which Tor exit nodes will
 connect to me?" Rather than listing every Tor relay, it only lists the exits
 whose exit policy actually permits connections to the service asking. The
-design and its rationale are in doc/torel-design.md; the man page
-(doc/tordnsel.8) documents every option.
+design and its rationale are in [doc/torel-design.md](doc/torel-design.md);
+the man page ([doc/tordnsel.8](doc/tordnsel.8)) documents every option.
 
------------------------------------------------------------------------------
+## Queries
 
-Queries
-
-Assume our ZoneOfAuthority is "exitlist.example.com". Addresses in names are
-reversed, as in other DNSBLs. A listed name has an A record of 127.0.0.2 (and a
-TXT record explaining why); an unlisted name is NXDOMAIN. Queries outside our
+Assume our `ZoneOfAuthority` is `exitlist.example.com`. Addresses in names are
+reversed, as in other DNSBLs. A listed name has an A record of `127.0.0.2` (and
+a TXT record explaining why); an unlisted name is NXDOMAIN. Queries outside our
 zone are REFUSED.
 
-  Type 1, "ip-port":  {IP1}.{port}.{IP2}.ip-port.exitlist.example.com
-    Listed iff there is a Tor exit at IP1 that permits connections to port
-    on IP2. E.g. "1.0.0.10.80.4.3.2.1.ip-port.exitlist.example.com" asks
-    whether 10.0.0.1 is a Tor exit that allows connections to 1.2.3.4:80.
-    A service at w.x.y.z:9999 would configure
-    "9999.z.y.x.w.ip-port.exitlist.example.com" as its DNSBL.
+### Type 1, "ip-port"
 
-  Type 2, "list":     {IP}.{listname}.list.exitlist.example.com
-    Listed iff IP is a Tor exit permitting connections to any member of a
-    list defined by the operator, e.g.
-        ExitList examplenet 192.0.2.10:6667,6697 198.51.100.0/24:6660-6669
+```
+{IP1}.{port}.{IP2}.ip-port.exitlist.example.com
+```
 
-  Type 3, "me":       {IP}.{port}.me.exitlist.example.com
-    Listed iff IP is a Tor exit permitting connections to port on the host
-    that sent the query (which is the recursive resolver, if one is used).
-    Answers are sent with a TTL of 0 so that resolvers don't share them.
+Listed iff there is a Tor exit at IP1 that permits connections to port on IP2.
+E.g. `1.0.0.10.80.4.3.2.1.ip-port.exitlist.example.com` asks whether 10.0.0.1
+is a Tor exit that allows connections to 1.2.3.4:80. A service at
+w.x.y.z:9999 would configure `9999.z.y.x.w.ip-port.exitlist.example.com` as
+its DNSBL.
 
-127.0.0.2 is always listed, for testing your setup (RFC 5782).
+### Type 2, "list"
 
-The HTTP interface (enabled with HTTPListenAddress) serves the same data:
+```
+{IP}.{listname}.list.exitlist.example.com
+```
 
-  GET /api/v1/ip-port?ip=IP1&port=PORT&dest=IP2
-  GET /api/v1/list?ip=IP&list=NAME        GET /api/v1/lists
-  GET /api/v1/me?ip=IP&port=PORT
-  GET /api/ip                     ({"IsTor":...,"IP":...} like check.torproject.org)
-  GET /torbulkexitlist[?ip=IP[&port=PORT]]
-  GET /exit-addresses             (results of active exit tests)
+Listed iff IP is a Tor exit permitting connections to any member of a list
+defined by the operator, e.g.
 
------------------------------------------------------------------------------
+```
+ExitList examplenet 192.0.2.10:6667,6697 198.51.100.0/24:6660-6669
+```
 
-Building
+### Type 3, "me"
 
-  TorDNSEL is written in Haskell. It builds with GHC 9.4 or newer (tested
-  with 9.4.7 and 9.10.3; see .github/workflows/ci.yml for the CI matrix) and
-  cabal-install 3.8 or newer:
+```
+{IP}.{port}.me.exitlist.example.com
+```
 
-    cabal update
-    cabal build
-    cabal test
-    cabal install --installdir=/usr/local/bin
+Listed iff IP is a Tor exit permitting connections to port on the host that
+sent the query (which is the recursive resolver, if one is used). Answers are
+sent with a TTL of 0 so that resolvers don't share them.
 
-  On Debian or Ubuntu you can also build with the distribution's packages
-  only, without Hackage access, using the Setup script:
+`127.0.0.2` is always listed, for testing your setup (RFC 5782).
 
-    apt-get install ghc libghc-network-dev libghc-conduit-dev \
-      libghc-conduit-extra-dev libghc-hunit-dev
-    runhaskell Setup.hs configure --enable-tests
-    runhaskell Setup.hs build
-    runhaskell Setup.hs test
-    runhaskell Setup.hs copy        # installs to /usr/local by default
+### HTTP interface
 
-  No C libraries beyond libc are needed (libcrypto is no longer used).
+The HTTP interface (enabled with `HTTPListenAddress`) serves the same data:
 
-Configuring Tor
+| Request | Answer |
+| --- | --- |
+| `GET /api/v1/ip-port?ip=IP1&port=PORT&dest=IP2` | Type 1 query |
+| `GET /api/v1/list?ip=IP&list=NAME` | Type 2 query |
+| `GET /api/v1/lists` | The configured lists |
+| `GET /api/v1/me?ip=IP&port=PORT` | Type 3 query |
+| `GET /api/ip` | `{"IsTor":...,"IP":...}` like check.torproject.org |
+| `GET /torbulkexitlist[?ip=IP[&port=PORT]]` | Exit addresses, one per line |
+| `GET /exit-addresses` | Results of active exit tests |
 
-  TorDNSEL needs a Tor client (0.4.8 or newer is tested) with a control port
-  and, for active testing, a SOCKS port, e.g. in the torrc:
+## Building
 
-    ControlPort 9051
-    CookieAuthentication 1
-    SocksPort 9050
+TorDNSEL is written in Haskell. It builds with GHC 9.4 or newer (tested with
+9.4.7 and 9.10.3; see [.github/workflows/ci.yml](.github/workflows/ci.yml) for
+the CI matrix) and cabal-install 3.8 or newer:
 
-  The cookie file must be readable by the TorDNSEL user (or use
-  HashedControlPassword with TorDNSEL's TorControlPassword). TorDNSEL turns on
-  FetchUselessDescriptors and FetchDirInfoEarly while it is connected, so that
-  Tor downloads every router descriptor.
+```sh
+cabal update
+cabal build
+cabal test
+cabal install --installdir=/usr/local/bin
+```
 
-Configuring TorDNSEL
+On Debian or Ubuntu you can also build with the distribution's packages only,
+without Hackage access, using the Setup script:
 
-  Copy config/tordnsel.conf.sample. At the very least, you'll need to uncomment
-  and modify ZoneOfAuthority, DomainName, SOARName, StateDirectory,
-  RuntimeDirectory, and probably DNSListenAddress. Delegate the zone to the
-  host running TorDNSEL with an NS record in the parent zone.
+```sh
+apt-get install ghc libghc-network-dev libghc-conduit-dev \
+  libghc-conduit-extra-dev libghc-hunit-dev
+runhaskell Setup.hs configure --enable-tests
+runhaskell Setup.hs build
+runhaskell Setup.hs test
+runhaskell Setup.hs copy        # installs to /usr/local by default
+```
 
-  To run exit tests, you'll need to specify at least EnableActiveTesting,
-  TestListenAddress, and TestDestinationAddress. The test destination must be
-  reachable from the Internet; Tor exits connect to it.
+No C libraries beyond libc are needed (libcrypto is no longer used).
 
-  Load a config file with the -f option. Options listed in
-  tordnsel.conf.sample can also be specified on the command line, where they
-  override the config file:
+## Configuring Tor
 
-    tordnsel -f /etc/tordnsel.conf --ZoneOfAuthority exitlist.example.com
+TorDNSEL needs a Tor client (0.4.8 or newer is tested) with a control port
+and, for active testing, a SOCKS port, e.g. in the torrc:
 
-  Check a configuration with --verify-config; reload it with SIGHUP or, from
-  inside a chroot, with "tordnsel --reconfigure RUNTIMEDIR < tordnsel.conf".
+```
+ControlPort 9051
+CookieAuthentication 1
+SocksPort 9050
+```
 
-  TorDNSEL needs an accurate system clock, so run an NTP client.
+The cookie file must be readable by the TorDNSEL user (or use
+`HashedControlPassword` with TorDNSEL's `TorControlPassword`). TorDNSEL turns
+on `FetchUselessDescriptors` and `FetchDirInfoEarly` while it is connected, so
+that Tor downloads every router descriptor.
 
-Running TorDNSEL
+## Configuring TorDNSEL
 
-  With systemd, see contrib/tordnsel.service. A SysV init script is in
-  contrib/tordnsel-init.d-script.sample. Either way:
+Copy [config/tordnsel.conf.sample](config/tordnsel.conf.sample). At the very
+least, you'll need to uncomment and modify `ZoneOfAuthority`, `DomainName`,
+`SOARName`, `StateDirectory`, `RuntimeDirectory`, and probably
+`DNSListenAddress`. Delegate the zone to the host running TorDNSEL with an NS
+record in the parent zone.
 
-    cp config/tordnsel.conf.sample /etc/tordnsel.conf
-    $EDITOR /etc/tordnsel.conf
-    adduser --system --group --no-create-home --home /var/lib/tordnsel tordnsel
-    mkdir -p /var/lib/tordnsel
+To run exit tests, you'll need to specify at least `EnableActiveTesting`,
+`TestListenAddress`, and `TestDestinationAddress`. The test destination must
+be reachable from the Internet; Tor exits connect to it.
 
-Testing against a private Tor network
+Load a config file with the `-f` option. Options listed in
+`tordnsel.conf.sample` can also be specified on the command line, where they
+override the config file:
 
-  tests/integration/ contains a chutney network definition and a script that
-  starts it, runs TorDNSEL with active testing, and checks the DNS and HTTP
-  answers. See tests/integration/README.
+```sh
+tordnsel -f /etc/tordnsel.conf --ZoneOfAuthority exitlist.example.com
+```
 
------------------------------------------------------------------------------
+Check a configuration with `--verify-config`; reload it with SIGHUP or, from
+inside a chroot, with `tordnsel --reconfigure RUNTIMEDIR < tordnsel.conf`.
 
-Limitations
+TorDNSEL needs an accurate system clock, so run an NTP client.
 
-  Only IPv4 is covered: exits' IPv6 addresses are not listed and queries can
-  only name IPv4 addresses. DNS is served over UDP only. See TODO.md.
+## Running TorDNSEL
+
+With systemd, see [contrib/tordnsel.service](contrib/tordnsel.service). A SysV
+init script is in
+[contrib/tordnsel-init.d-script.sample](contrib/tordnsel-init.d-script.sample).
+Either way:
+
+```sh
+cp config/tordnsel.conf.sample /etc/tordnsel.conf
+$EDITOR /etc/tordnsel.conf
+adduser --system --group --no-create-home --home /var/lib/tordnsel tordnsel
+mkdir -p /var/lib/tordnsel
+```
+
+## Testing against a private Tor network
+
+[tests/integration/](tests/integration/) contains a chutney network definition
+and a script that starts it, runs TorDNSEL with active testing, and checks the
+DNS and HTTP answers. See [tests/integration/README](tests/integration/README).
+
+## Limitations
+
+Only IPv4 is covered: exits' IPv6 addresses are not listed and queries can only
+name IPv4 addresses. DNS is served over UDP only. See [TODO.md](TODO.md).
