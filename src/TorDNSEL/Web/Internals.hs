@@ -9,7 +9,7 @@
 --
 -- /Internals/: should only be imported by the public module and tests.
 --
--- The web interface. @doc/torel-design.txt@ says it \"should provide the same
+-- The web interface. @doc/torel-design.md@ says it \"should provide the same
 -- data as the dns interface\", so each DNS query type has an HTTP equivalent
 -- returning JSON, and the exit list can also be fetched in bulk:
 --
@@ -475,7 +475,7 @@ handleRequest conf now ns clientAddr localAddr req
       [ "TorDNSEL: a Tor DNS-based exit list."
       , ""
       , "This server answers, over DNS and HTTP, the question \"which Tor exit"
-      , "nodes will connect to me?\" (see doc/torel-design.txt)."
+      , "nodes will connect to me?\" (see doc/torel-design.md)."
       , ""
       , "  GET /api/v1/ip-port?ip=IP1&port=PORT&dest=IP2"
       , "      Is IP1 a Tor exit permitting connections to IP2:PORT?"

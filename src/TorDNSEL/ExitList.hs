@@ -9,7 +9,7 @@
 --
 -- Answering exit list questions against our current view of the Tor network.
 -- This is shared by the DNS interface and the web interface, which by design
--- provide the same data (see @doc/torel-design.txt@).
+-- provide the same data (see @doc/torel-design.md@).
 --
 -- The basic question is always the same: /is there a running Tor exit node
 -- whose traffic leaves the Tor network from address A, and whose exit policy

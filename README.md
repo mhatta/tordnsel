@@ -3,7 +3,7 @@ TorDNSEL: A Tor DNS-based Exit List
 TorDNSEL answers, over DNS and HTTP, the question "which Tor exit nodes will
 connect to me?" Rather than listing every Tor relay, it only lists the exits
 whose exit policy actually permits connections to the service asking. The
-design and its rationale are in doc/torel-design.txt; the man page
+design and its rationale are in doc/torel-design.md; the man page
 (doc/tordnsel.8) documents every option.
 
 -----------------------------------------------------------------------------
@@ -125,4 +125,4 @@ Testing against a private Tor network
 Limitations
 
   Only IPv4 is covered: exits' IPv6 addresses are not listed and queries can
-  only name IPv4 addresses. DNS is served over UDP only. See TODO.
+  only name IPv4 addresses. DNS is served over UDP only. See TODO.md.

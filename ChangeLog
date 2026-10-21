@@ -21,7 +21,7 @@
     - Parse both forms of router status entries and the current descriptor
       and exit policy syntax ("private", IPv6 rules, *4/*6).
 
-  o New features (doc/torel-design.txt):
+  o New features (doc/torel-design.md):
     - Query type 2, "{IP}.{listname}.list.{zone}", with lists defined by the
       new ExitList option.
     - Query type 3, "{IP}.{port}.me.{zone}", answered with a TTL of 0.

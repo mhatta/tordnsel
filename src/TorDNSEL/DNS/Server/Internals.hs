@@ -10,7 +10,7 @@
 -- /Internals/: should only be imported by the public module and tests.
 --
 -- Implements a DNS server thread that answers DNS queries for exit list
--- information, as described in @doc/torel-design.txt@:
+-- information, as described in @doc/torel-design.md@:
 --
 -- [Query type 1, \"ip-port\"]
 --   @{IP1}.{port}.{IP2}.ip-port.{zone}@ is listed iff {IP1} is a Tor exit
@@ -272,7 +272,7 @@ dropAuthZone (DomainName authZone) (DomainName name) =
 
 -- | Queries asking whether there's a Tor exit node at a specific IP address.
 data ExitListQuery
-  -- | Query type 1 from @doc/torel-design.txt@:
+  -- | Query type 1 from @doc/torel-design.md@:
   -- @{IP1}.{port}.{IP2}.ip-port.{zone}@.
   = IPPort
   { -- | The address of the candidate exit node.

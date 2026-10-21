@@ -4,7 +4,7 @@ Done in 0.2.0 (see ChangeLog):
  - builds with current GHC (9.4 and newer) and libraries
  - works with current Tor (0.4.8/0.4.9): NEWCONSENSUS, controller-mapped
    .exit exit tests, current descriptor and policy syntax
- - query types 2 ("list") and 3 ("me") from torel-design.txt
+ - query types 2 ("list") and 3 ("me") from torel-design.md
  - a web interface providing the same data as the DNS interface, including
    a check.torproject.org-style /api/ip and /torbulkexitlist
  - EDNS(0), TXT records, QNAME-minimisation-friendly empty non-terminals
