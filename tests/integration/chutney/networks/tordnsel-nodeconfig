@@ -11,8 +11,11 @@
 #
 # Exit C is configured as a non-exit relay that turns ExitRelay back on, so
 # that its exit policy is ours alone and not appended to chutney's default
-# exit policy.
-Authority = Node(tag="a", authority=True, relay=True)
+# exit policy (which accepts everything). chutney then leaves it out of the
+# authorities' TestingDirAuthVoteExit list, so the authorities vote the Exit
+# flag for every relay, as older chutney did.
+Authority = Node(tag="a", authority=True, relay=True,
+                 extra_raw_torrc="TestingDirAuthVoteExit *\n")
 ExitA = Node(tag="ea", relay=True, exit=True, ip="10.200.0.11",
              extra_raw_torrc="OutboundBindAddressExit 10.200.0.11\n")
 ExitB = Node(tag="eb", relay=True, exit=True, ip="10.200.0.12",
