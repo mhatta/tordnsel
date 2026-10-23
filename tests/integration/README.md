@@ -43,6 +43,12 @@ With a build made by `runhaskell Setup.hs build`, the binary is
   Run as a normal user with `SUDO=sudo` to use sudo for just that step.
 - The script uses ports 5000-5007, 7000-7003, 8000-8007, 9000-9007, 15353 and
   18080 on the loopback interface.
+- The working directory is created under `$TMPDIR` (default `/tmp`). Tor
+  can't use a Unix socket whose path is longer than about 100 bytes, so keep
+  `$TMPDIR` short; the script stops early if it is too long.
+- On failure the script shows the end of chutney's output (kept in
+  `chutney.log` in the working directory) and, if the Tor nodes didn't start,
+  what `tor --verify-config` says about the first node's torrc.
 - `KEEP=1` keeps the working directory (TorDNSEL's log, the Tor nodes' logs
   and data) instead of deleting it.
 - A run takes a few minutes, mostly waiting for the network to bootstrap and

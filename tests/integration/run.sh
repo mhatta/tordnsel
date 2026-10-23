@@ -11,7 +11,8 @@
 # root; set SUDO=sudo to run just that step with sudo. Set KEEP=1 to keep the
 # working directory (logs, Tor data) afterwards.
 
-set -euo pipefail
+# -E makes the ERR trap below fire for failures inside functions too.
+set -Eeuo pipefail
 
 if [ $# -ne 2 ]; then
   echo "usage: $0 CHUTNEY_DIR TORDNSEL_BINARY" >&2
@@ -43,6 +44,31 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'log "Failed at line $LINENO: $BASH_COMMAND"' ERR
+
+# logged NAME COMMAND...: run COMMAND with its output appended to
+# $work/NAME.log; if it fails, show the end of that log.
+logged() {
+  local name=$1
+  shift
+  if ! "$@" >>"$work/$name.log" 2>&1; then
+    log "\"$*\" failed; the end of $work/$name.log:"
+    tail -n 30 "$work/$name.log" | sed 's/^/      /' >&2
+    return 1
+  fi
+}
+
+# Tor won't bind a Unix socket whose path doesn't fit in sun_path (108 bytes
+# on Linux, 104 on the BSDs, including the terminating NUL), and chutney puts
+# each node's control socket deep inside our working directory. When the path
+# is too long every tor fails to start with nothing but "exit 1" from chutney,
+# so check before starting.
+sock=$work/chutney/net/nodes.0000000000/000ea/control
+if [ "${#sock}" -gt 103 ]; then
+  log "The working directory $work is too long for Tor's control sockets"
+  log "(e.g. $sock is ${#sock} bytes; at most 103 work everywhere)."
+  log "Set TMPDIR to a directory with a shorter path, e.g. TMPDIR=/tmp."
+  exit 69
+fi
 
 # wait_for DESCRIPTION SECONDS COMMAND...
 wait_for() {
@@ -144,11 +170,20 @@ export CHUTNEY_DISABLE_IPV6=1
 
 log "Starting the Tor network."
 if [ "$new_cli" = 1 ]; then
-  ./chutney --data-dir "$CHUTNEY_DATA_DIR" init \
-    --net-from-script-path networks/tordnsel-nodeconfig >/dev/null
+  logged chutney ./chutney --data-dir "$CHUTNEY_DATA_DIR" init \
+    --net-from-script-path networks/tordnsel-nodeconfig
 fi
-chutney_cmd configure >/dev/null
-chutney_cmd start >/dev/null
+logged chutney chutney_cmd configure
+if ! logged chutney chutney_cmd start; then
+  # chutney only reports that tor exited. Ask the first node's tor why.
+  for n in "$CHUTNEY_DATA_DIR"/nodes/*/; do
+    log "tor --verify-config for ${n%/}:"
+    "$CHUTNEY_TOR" --verify-config -f "${n}torrc" 2>&1 |
+      grep -E '\[(warn|err)\]' | tail -n 5 | sed 's/^/      /' >&2 || true
+    break
+  done
+  exit 1
+fi
 nodes=$(readlink -f "$CHUTNEY_DATA_DIR/nodes")
 # The client is the last node; its directory name ends in "c" (e.g. 007c).
 client=$(ls -d "$nodes"/*c | tail -1)
