@@ -34,8 +34,16 @@ With a build made by `runhaskell Setup.hs build`, the binary is
     python3-tomli-w python3-typeguard python3-paramiko python3-rpyc
   ```
 
-  The script runs under `sudo`, so modules installed with `pip install --user`
-  are not seen; install them with apt (or system-wide).
+  If the script runs under `sudo`, modules installed with `pip install --user`
+  are not seen; install them with apt (or system-wide). Alternatively, run it
+  as a normal user with `SUDO=sudo` and a virtual environment first on the
+  `PATH` (chutney runs the first `python3` it finds), as the CI does:
+
+  ```sh
+  python3 -m venv ~/chutney-venv
+  ~/chutney-venv/bin/pip install pyasyncore pyasynchat
+  PATH=~/chutney-venv/bin:$PATH SUDO=sudo tests/integration/run.sh chutney dist/build/tordnsel/tordnsel
+  ```
 
 ## Notes
 

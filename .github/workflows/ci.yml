@@ -10,13 +10,15 @@ on:
 jobs:
   build:
     name: GHC ${{ matrix.ghc }}
-    runs-on: ubuntu-latest
+    # Pinned rather than ubuntu-latest, so that a change of the runner image
+    # doesn't break the build behind our backs.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
         ghc: ['9.4', '9.6', '9.8', '9.10', '9.12', '9.14']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: haskell-actions/setup@v2
         id: setup
         with:
@@ -27,7 +29,7 @@ jobs:
           cabal update
           cabal configure --enable-tests
           cabal build all --dry-run
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: ${{ steps.setup.outputs.cabal-store }}
           key: cabal-${{ runner.os }}-${{ matrix.ghc }}-${{ hashFiles('dist-newstyle/cache/plan.json') }}
@@ -45,39 +47,91 @@ jobs:
     name: Ubuntu packages (Setup.hs)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y ghc libghc-network-dev libghc-conduit-dev \
             libghc-conduit-extra-dev libghc-hunit-dev
       - name: Build and test
+        # The runner image puts a GHC installed with ghcup (without our
+        # dependencies) first on the PATH; use Ubuntu's instead.
         run: |
-          runhaskell Setup.hs configure --enable-tests --user
-          runhaskell Setup.hs build
-          runhaskell Setup.hs test
+          export PATH=/usr/bin:$PATH
+          ghc --version
+          runghc Setup.hs configure --enable-tests --user \
+            --with-compiler=/usr/bin/ghc --with-hc-pkg=/usr/bin/ghc-pkg
+          runghc Setup.hs build
+          runghc Setup.hs test
 
   integration:
     # End-to-end test against a private Tor network (see tests/integration).
-    name: Integration (chutney)
+    name: Integration (chutney ${{ matrix.chutney }})
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The last chutney with the old command line (the GitHub mirror,
+          # frozen since chutney moved to Tor's GitLab).
+          - chutney: legacy
+            experimental: false
+          # Current chutney. Not required to pass until it has been seen to
+          # work; then pin it to a commit and drop "experimental".
+          - chutney: current
+            experimental: true
+    continue-on-error: ${{ matrix.experimental }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+      - name: Get chutney (legacy)
+        if: matrix.chutney == 'legacy'
+        uses: actions/checkout@v6
         with:
           repository: torproject/chutney
+          ref: 62b54a55215c94eb14adc22c5acd17b2ada04b76
           path: chutney
+      - name: Get chutney (current)
+        if: matrix.chutney == 'current'
+        run: |
+          git clone --depth 1 https://gitlab.torproject.org/tpo/core/chutney.git chutney
+          git -C chutney log -1 --format='chutney %H %cd'
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y tor bind9-dnsutils curl ghc \
+          sudo apt-get install -y tor bind9-dnsutils curl python3-venv ghc \
             libghc-network-dev libghc-conduit-dev libghc-conduit-extra-dev \
             libghc-hunit-dev
           sudo systemctl stop tor || true
-          python3 -m pip install --user pyasyncore pyasynchat || true
+          tor --version
+          # Python 3.12 removed asyncore and asynchat, which chutney still
+          # imports. pip can't install into Ubuntu's Python (PEP 668), so use
+          # a virtual environment; chutney runs the first python3 on the PATH.
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install pyasyncore pyasynchat
+          if [ "${{ matrix.chutney }}" = current ]; then
+            "$RUNNER_TEMP/venv/bin/pip" install tomli_w typeguard paramiko rpyc
+          fi
+          "$RUNNER_TEMP/venv/bin/python3" -c 'import asyncore, asynchat'
       - name: Build
+        # As in the distro job: use Ubuntu's GHC, not the runner's ghcup one.
         run: |
-          runhaskell Setup.hs configure --user
-          runhaskell Setup.hs build
+          export PATH=/usr/bin:$PATH
+          runghc Setup.hs configure --user \
+            --with-compiler=/usr/bin/ghc --with-hc-pkg=/usr/bin/ghc-pkg
+          runghc Setup.hs build
       - name: Run
-        run: SUDO=sudo tests/integration/run.sh chutney dist/build/tordnsel/tordnsel
+        run: |
+          export PATH=$RUNNER_TEMP/venv/bin:$PATH
+          SUDO=sudo KEEP=1 TMPDIR=$RUNNER_TEMP \
+            tests/integration/run.sh chutney dist/build/tordnsel/tordnsel
+      - name: Keep the logs
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: integration-logs-${{ matrix.chutney }}
+          path: |
+            ${{ runner.temp }}/tordnsel-it.*/*.log
+            ${{ runner.temp }}/tordnsel-it.*/*.out
+            ${{ runner.temp }}/tordnsel-it.*/chutney/net/nodes/*/*.log
+            ${{ runner.temp }}/tordnsel-it.*/chutney/net/nodes/*/torrc
+          if-no-files-found: ignore
