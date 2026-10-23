@@ -1,0 +1,32 @@
+# The same network as "tordnsel", for chutney versions whose Node() takes
+# NodeConfig fields (2025 and later): torrc templates can no longer be chosen
+# per node, so the per-node settings go in extra_raw_torrc instead.
+#
+# - 4 directory authorities on 127.0.0.1 (not exits)
+# - exit A advertises 10.200.0.11 and exits from 10.200.0.11
+# - exit B advertises 10.200.0.12 but exits from 10.200.0.99
+# - exit C advertises 10.200.0.13, exits from it, and only permits
+#   connections to 10.200.0.0/16:6667 and *:443
+# - a client whose control and SOCKS ports TorDNSEL uses
+#
+# Exit C is configured as a non-exit relay that turns ExitRelay back on, so
+# that its exit policy is ours alone and not appended to chutney's default
+# exit policy.
+Authority = Node(tag="a", authority=True, relay=True)
+ExitA = Node(tag="ea", relay=True, exit=True, ip="10.200.0.11",
+             extra_raw_torrc="OutboundBindAddressExit 10.200.0.11\n")
+ExitB = Node(tag="eb", relay=True, exit=True, ip="10.200.0.12",
+             extra_raw_torrc="OutboundBindAddressExit 10.200.0.99\n")
+ExitC = Node(tag="ec", relay=True, ip="10.200.0.13",
+             extra_raw_torrc="ExitRelay 1\n"
+                             "ExitPolicyRejectPrivate 0\n"
+                             "ExitPolicy accept 10.200.0.0/16:6667\n"
+                             "ExitPolicy accept *:443\n"
+                             "ExitPolicy reject *:*\n"
+                             "OutboundBindAddressExit 10.200.0.13\n")
+Client = Node(tag="c", client=True,
+              extra_raw_torrc="FetchUselessDescriptors 1\n")
+
+NODES = Authority.getN(4) + [ExitA, ExitB, ExitC] + Client.getN(1)
+
+ConfigureNodes(NODES)

@@ -145,7 +145,7 @@ export CHUTNEY_DISABLE_IPV6=1
 log "Starting the Tor network."
 if [ "$new_cli" = 1 ]; then
   ./chutney --data-dir "$CHUTNEY_DATA_DIR" init \
-    --net-from-script-path networks/tordnsel >/dev/null
+    --net-from-script-path networks/tordnsel-nodeconfig >/dev/null
 fi
 chutney_cmd configure >/dev/null
 chutney_cmd start >/dev/null
