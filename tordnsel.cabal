@@ -1,6 +1,6 @@
 cabal-version:   2.4
 name:            tordnsel
-version:         0.2.0
+version:         0.2.1
 synopsis:        provides a DNSBL-style interface for detecting Tor exit nodes
 description:
   TorDNSEL implements a design for a DNSBL-style interface for detecting
@@ -61,7 +61,7 @@ library
   import:           shared
   hs-source-dirs:   src
   ghc-options:      -funbox-strict-fields
-  cpp-options:      -DVERSION="0.2.0"
+  cpp-options:      -DVERSION="0.2.1"
   exposed-modules:  TorDNSEL.Config
                     TorDNSEL.Config.Internals
                     TorDNSEL.Control.Concurrent.Future
