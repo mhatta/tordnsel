@@ -42,7 +42,6 @@ import qualified Control.Exception as E
 import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy as L
 import Data.ByteString (ByteString)
-import Data.Typeable (Typeable)
 import Network.Socket (HostAddress)
 import System.IO (Handle, BufferMode(NoBuffering), hClose, hSetBuffering)
 
@@ -172,7 +171,6 @@ decodeResponse resp =
 data SocksError
   = SocksError !Result -- ^ A known Socks error code.
   | SocksProtocolError -- ^ The response doesn't follow the Socks protocol.
-  deriving Typeable
 
 instance Show SocksError where
   showsPrec _ (SocksError result) = cat "Socks error: " result

@@ -43,7 +43,6 @@ import Control.Monad (when, guard)
 import Data.Bits ((.|.), shiftL)
 import qualified Data.ByteString.Char8 as B
 import Data.ByteString (ByteString)
-import Data.Dynamic (Typeable)
 import Data.Char (toLower, isDigit)
 import qualified Data.List as L
 import qualified Data.Map as M
@@ -100,7 +99,6 @@ instance Thread DNSServer where
 data DNSMessage
   = Reconfigure (DNSConfig -> DNSConfig) (IO ()) -- ^ Reconfigure the DNS server
   | Terminate ExitReason -- ^ Terminate the DNS server gracefully
-  deriving Typeable
 
 -- This is to please the Exception instance.
 instance Show DNSMessage where

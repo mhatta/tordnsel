@@ -154,7 +154,6 @@ import Data.Maybe
 import qualified Data.Sequence as S
 import Data.Sequence ((<|), ViewR((:>)), viewr)
 import Data.Time (UTCTime, TimeZone, localTimeToUTC, getCurrentTimeZone)
-import Data.Typeable (Typeable)
 import System.IO (Handle, hClose, hSetBuffering, BufferMode(..), hFlush)
 import System.IO.Error (isEOFError)
 
@@ -1139,7 +1138,6 @@ data TorControlError
   | ParseError ShowS -- ^ Parsing a reply from Tor failed.
   | ProtocolError ShowS -- ^ A reply from Tor didn't follow the protocol.
   | ConnectionClosed -- ^ The control connection is closed.
-  deriving Typeable
 
 instance Show TorControlError where
   showsPrec _ (TCError command (x,y,z) text) = cat (commandFailed command)

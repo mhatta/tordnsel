@@ -35,8 +35,6 @@ import Control.Monad (unless)
 import qualified Data.Foldable as F
 import qualified Data.Map as M
 import qualified Data.Set as S
---  import Data.Dynamic (Dynamic, fromDynamic, toDyn, Typeable)
-import Data.Typeable (Typeable)
 import Data.List (nub)
 import Data.Unique (Unique, newUnique)
 import System.IO (hPutStrLn, hFlush, stderr)
@@ -113,7 +111,7 @@ assertThreadMap tm =
 -- | An internal type used to transmit the originating 'ThreadId' in an
 -- asynchronous exception to a linked thread.
 data ExitSignal = ExitSignal !ThreadId !ExitReason
-  deriving (Show, Typeable)
+  deriving Show
 
 instance E.Exception ExitSignal
 
@@ -391,7 +389,7 @@ unsetTrapExit = setTrapExit . defaultSignal =<< C.myThreadId
 
 -- | An exception related to links or monitors.
 data LinkException = NonexistentThread -- ^ 
-  deriving (Eq, Typeable)
+  deriving Eq
 
 instance Show LinkException where
   show NonexistentThread = "Attempt to link to nonexistent thread"
