@@ -42,6 +42,7 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+trap 'log "Failed at line $LINENO: $BASH_COMMAND"' ERR
 
 # wait_for DESCRIPTION SECONDS COMMAND...
 wait_for() {
@@ -95,14 +96,17 @@ for d in networks torrc_templates; do
   cp -r "$here/chutney/$d/." "$target/"
 done
 # Python 3.13 removed cgitb, which older chutney uses for nicer tracebacks.
-grep -rlx 'import cgitb' lib 2>/dev/null | while read -r f; do
+# (grep finds nothing in newer chutney; with pipefail that must not stop us.)
+for f in $(grep -rlx 'import cgitb' lib 2>/dev/null || true); do
   sed -i 's/^import cgitb$/try:\n    import cgitb\nexcept ImportError:\n    cgitb = None/;
           s/^cgitb.enable(format="plain")$/if cgitb: cgitb.enable(format="plain")/' "$f"
 done
 # Don't require IPv6 on the test host.
 for f in torrc_templates/relay-non-dir.tmpl torrc_templates/relay-non-exit.tmpl; do
-  [ -f "$f" ] && sed -i 's/^OrPort \$orport$/OrPort $orport IPv4Only/;
-                         s/^DirPort \$dirport$/DirPort $dirport IPv4Only/' "$f"
+  if [ -f "$f" ]; then
+    sed -i 's/^OrPort \$orport$/OrPort $orport IPv4Only/;
+            s/^DirPort \$dirport$/DirPort $dirport IPv4Only/' "$f"
+  fi
 done
 
 # Older chutney needs the asyncore/asynchat modules removed in Python 3.12.
