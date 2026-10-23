@@ -33,7 +33,7 @@ log() { printf '%s\n' "$*" >&2; }
 cleanup() {
   [ -n "$td_pid" ] && kill "$td_pid" 2>/dev/null || true
   if [ -d "$work/chutney" ]; then
-    (cd "$work/chutney" && ./chutney stop networks/tordnsel >/dev/null 2>&1) || true
+    (cd "$work/chutney" && chutney_cmd stop >/dev/null 2>&1) || true
   fi
   if [ "${KEEP:-0}" = 1 ]; then
     log "Kept $work"
@@ -125,14 +125,34 @@ done
 export CHUTNEY_TOR=${CHUTNEY_TOR:-$(command -v tor)}
 export CHUTNEY_TOR_GENCERT=${CHUTNEY_TOR_GENCERT:-$(command -v tor-gencert)}
 export CHUTNEY_DATA_DIR=$work/chutney/net
+# chutney's command line changed: older versions take the network file with
+# every command, newer ones load it once with "init" and take --data-dir.
+if ./chutney --help 2>/dev/null | grep -q -- '--data-dir'; then
+  new_cli=1
+  chutney_cmd() { ./chutney --data-dir "$CHUTNEY_DATA_DIR" "$@"; }
+else
+  new_cli=0
+  chutney_cmd() { ./chutney "$@" networks/tordnsel; }
+fi
 mkdir -p "$CHUTNEY_DATA_DIR"
 rm -rf "$CHUTNEY_DATA_DIR"/nodes*
 
+# Our relays listen on 10.200.0.0/24; newer chutney only binds non-loopback
+# addresses it is told to trust. Older chutney ignores these variables.
+export CHUTNEY_TRUSTED_NETWORKS=10.200.0.0/24
+export CHUTNEY_DISABLE_IPV6=1
+
 log "Starting the Tor network."
-./chutney configure networks/tordnsel >/dev/null
-./chutney start networks/tordnsel >/dev/null
+if [ "$new_cli" = 1 ]; then
+  ./chutney --data-dir "$CHUTNEY_DATA_DIR" init networks/tordnsel >/dev/null
+fi
+chutney_cmd configure >/dev/null
+chutney_cmd start >/dev/null
 nodes=$(readlink -f "$CHUTNEY_DATA_DIR/nodes")
-client=$nodes/007c
+# The client is the last node; its directory name ends in "c" (e.g. 007c).
+client=$(ls -d "$nodes"/*c | tail -1)
+control_port=$(awk 'tolower($1) == "controlport" { sub(/.*:/, "", $2); print $2; exit }' "$client/torrc")
+socks_port=$(awk 'tolower($1) == "socksport" { sub(/.*:/, "", $2); print $2; exit }' "$client/torrc")
 wait_for "the client to bootstrap" 300 grep -q "Bootstrapped 100%" "$client/notice.log"
 
 log "Starting TorDNSEL."
@@ -144,8 +164,8 @@ SOARName hostmaster.example.com
 StateDirectory $work/state
 RuntimeDirectory $work/run
 DNSListenAddress 127.0.0.1:$dns_port
-TorControlAddress 127.0.0.1:8007
-TorSocksAddress 127.0.0.1:9007
+TorControlAddress 127.0.0.1:$control_port
+TorSocksAddress 127.0.0.1:$socks_port
 Log info file $work/tordnsel.log
 EnableActiveTesting True
 TestListenAddress 10.200.0.1:6667,10080
