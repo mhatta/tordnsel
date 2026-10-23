@@ -30,11 +30,9 @@ With a build made by `runhaskell Setup.hs build`, the binary is
 
   ```sh
   sudo apt install tor bind9-dnsutils curl iproute2 \
-    python3-asyncore python3-standard-asynchat \
+    python3-pyasyncore python3-standard-asynchat \
     python3-tomli-w python3-typeguard python3-paramiko python3-rpyc
   ```
-
-  (On Ubuntu 26.04 the asyncore package is `python3-pyasyncore`.)
 
   The script runs under `sudo`, so modules installed with `pip install --user`
   are not seen; install them with apt (or system-wide).
