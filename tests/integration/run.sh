@@ -5,8 +5,8 @@
 #
 # usage: tests/integration/run.sh CHUTNEY_DIR TORDNSEL_BINARY
 #
-# Needs tor and tor-gencert, python3 (with the pyasyncore and pyasynchat
-# backports on Python >= 3.12), dig, curl and iproute2. The addresses
+# Needs tor and tor-gencert, python3 with the modules chutney needs (see
+# tests/integration/README.md), dig, curl and iproute2. The addresses
 # 10.200.0.{1,11,12,13,99} are added to the loopback interface, which needs
 # root; set SUDO=sudo to run just that step with sudo. Set KEEP=1 to keep the
 # working directory (logs, Tor data) afterwards.

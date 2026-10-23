@@ -150,7 +150,7 @@ mkdir -p /var/lib/tordnsel
 
 [tests/integration/](tests/integration/) contains a chutney network definition
 and a script that starts it, runs TorDNSEL with active testing, and checks the
-DNS and HTTP answers. See [tests/integration/README](tests/integration/README).
+DNS and HTTP answers. See [tests/integration/README.md](tests/integration/README.md).
 
 ## Limitations
 
