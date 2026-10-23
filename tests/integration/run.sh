@@ -112,7 +112,7 @@ done
 # Older chutney needs the asyncore/asynchat modules removed in Python 3.12.
 if grep -rqE '^[[:space:]]*import (asyncore|asynchat)' lib 2>/dev/null &&
    ! python3 -c 'import asyncore, asynchat' 2>/dev/null; then
-  log "This chutney needs asyncore and asynchat: pip install pyasyncore pyasynchat"
+  log "chutney needs asyncore and asynchat; on Debian: apt install python3-asyncore python3-standard-asynchat"
   exit 69
 fi
 

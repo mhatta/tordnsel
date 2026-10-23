@@ -20,20 +20,21 @@ With a build made by `runhaskell Setup.hs build`, the binary is
 
 - `tor` and `tor-gencert` (Tor 0.4.8 or newer)
 - `dig`, `curl` and `ip` (iproute2)
-- Python 3 with the modules chutney needs. They depend on the chutney
-  version:
-
-  | chutney | Python modules | Debian/Ubuntu packages |
-  | --- | --- | --- |
-  | current (GitLab) | `tomli_w`, `typeguard`, `paramiko`, `rpyc` | `python3-tomli-w python3-typeguard python3-paramiko python3-rpyc` |
-  | older (2024 and before) | `asyncore`, `asynchat` (removed in Python 3.12) | `python3-pyasyncore`, or `pip install pyasyncore pyasynchat` |
+- Python 3 with the modules chutney needs:
+  - `asyncore` and `asynchat`, removed from the standard library in
+    Python 3.12 and needed by every chutney version so far
+  - in addition, for current chutney from GitLab: `tomli_w`, `typeguard`,
+    `paramiko` and `rpyc`
 
   On Debian sid:
 
   ```sh
   sudo apt install tor bind9-dnsutils curl iproute2 \
+    python3-asyncore python3-standard-asynchat \
     python3-tomli-w python3-typeguard python3-paramiko python3-rpyc
   ```
+
+  (On Ubuntu 26.04 the asyncore package is `python3-pyasyncore`.)
 
   The script runs under `sudo`, so modules installed with `pip install --user`
   are not seen; install them with apt (or system-wide).
