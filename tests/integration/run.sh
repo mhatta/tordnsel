@@ -21,7 +21,7 @@ fi
 here=$(cd "$(dirname "$0")" && pwd)
 chutney_src=$(cd "$1" && pwd)
 tordnsel=$(cd "$(dirname "$2")" && pwd)/$(basename "$2")
-work=$(mktemp -d "${TMPDIR:-/tmp}/tordnsel-it.XXXXXX")
+work=$(cd "$(mktemp -d "${TMPDIR:-/tmp}/tordnsel-it.XXXXXX")" && pwd -P)
 dns_port=${DNS_PORT:-15353}
 http_port=${HTTP_PORT:-18080}
 zone=exitlist.example.com
@@ -74,10 +74,43 @@ dns() { # dns NAME [TYPE] -> "STATUS answers..."
 
 http() { curl -s --noproxy '*' "http://127.0.0.1:$http_port$1"; }
 
-python3 -c 'import asyncore, asynchat' 2>/dev/null || {
-  log "chutney needs asyncore and asynchat: pip install pyasyncore pyasynchat"
+log "Preparing chutney in $work."
+cp -r "$chutney_src" "$work/chutney"
+cd "$work/chutney"
+# Add our network definition and torrc templates. In some versions of
+# chutney networks/ and torrc_templates/ are symbolic links to directories
+# elsewhere in the tree, so copy into wherever they really are (never into
+# the original chutney clone).
+for d in networks torrc_templates; do
+  if [ -L "$d" ]; then
+    target=$(readlink -f "$d")
+    case "$target" in
+      "$work"/*) ;;
+      *) rm "$d"; cp -r "$target" "$d"; target=$PWD/$d ;;
+    esac
+  else
+    target=$PWD/$d
+  fi
+  mkdir -p "$target"
+  cp -r "$here/chutney/$d/." "$target/"
+done
+# Python 3.13 removed cgitb, which older chutney uses for nicer tracebacks.
+grep -rlx 'import cgitb' lib 2>/dev/null | while read -r f; do
+  sed -i 's/^import cgitb$/try:\n    import cgitb\nexcept ImportError:\n    cgitb = None/;
+          s/^cgitb.enable(format="plain")$/if cgitb: cgitb.enable(format="plain")/' "$f"
+done
+# Don't require IPv6 on the test host.
+for f in torrc_templates/relay-non-dir.tmpl torrc_templates/relay-non-exit.tmpl; do
+  [ -f "$f" ] && sed -i 's/^OrPort \$orport$/OrPort $orport IPv4Only/;
+                         s/^DirPort \$dirport$/DirPort $dirport IPv4Only/' "$f"
+done
+
+# Older chutney needs the asyncore/asynchat modules removed in Python 3.12.
+if grep -rqE '^[[:space:]]*import (asyncore|asynchat)' lib 2>/dev/null &&
+   ! python3 -c 'import asyncore, asynchat' 2>/dev/null; then
+  log "This chutney needs asyncore and asynchat: pip install pyasyncore pyasynchat"
   exit 69
-}
+fi
 
 log "Adding test addresses to the loopback interface."
 for a in 1 11 12 13 99; do
@@ -85,28 +118,16 @@ for a in 1 11 12 13 99; do
     ${SUDO:-} ip addr add "10.200.0.$a/32" dev lo
 done
 
-log "Preparing chutney in $work."
-cp -r "$chutney_src" "$work/chutney"
-cp -r "$here/chutney/." "$work/chutney/"
-cd "$work/chutney"
-rm -rf net/nodes*
-# Python 3.13 removed cgitb, which chutney only uses for nicer tracebacks.
-sed -i 's/^import cgitb$/try:\n    import cgitb\nexcept ImportError:\n    cgitb = None/;
-        s/^cgitb.enable(format="plain")$/if cgitb: cgitb.enable(format="plain")/' \
-  lib/chutney/TorNet.py lib/chutney/Debug.py
-# Don't require IPv6 on the test host.
-sed -i 's/^OrPort \$orport$/OrPort $orport IPv4Only/' \
-  torrc_templates/relay-non-dir.tmpl
-sed -i 's/^DirPort \$dirport$/DirPort $dirport IPv4Only/' \
-  torrc_templates/relay-non-exit.tmpl
-
 export CHUTNEY_TOR=${CHUTNEY_TOR:-$(command -v tor)}
 export CHUTNEY_TOR_GENCERT=${CHUTNEY_TOR_GENCERT:-$(command -v tor-gencert)}
+export CHUTNEY_DATA_DIR=$work/chutney/net
+mkdir -p "$CHUTNEY_DATA_DIR"
+rm -rf "$CHUTNEY_DATA_DIR"/nodes*
 
 log "Starting the Tor network."
 ./chutney configure networks/tordnsel >/dev/null
 ./chutney start networks/tordnsel >/dev/null
-nodes=$(readlink -f net/nodes)
+nodes=$(readlink -f "$CHUTNEY_DATA_DIR/nodes")
 client=$nodes/007c
 wait_for "the client to bootstrap" 300 grep -q "Bootstrapped 100%" "$client/notice.log"
 
