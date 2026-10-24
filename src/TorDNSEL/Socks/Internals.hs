@@ -64,7 +64,7 @@ withSocksConnection :: Handle -> Address -> Port -> IO a -> IO a
 withSocksConnection handle addr port io = (`E.finally` hClose handle) $ do
   hSetBuffering handle NoBuffering
   B.hPut handle . encodeRequest $ Request Connect addr port
-  r <- decodeResponse =<< B.hGet handle 8
+  r <- decodeResponse `fmap` B.hGet handle 8
   case r of
     Just (Response Granted _ _) -> io
     Just (Response result _ _)  -> E.throwIO (SocksError result)
@@ -140,15 +140,15 @@ encodeRequest = B.concat . L.toChunks . runPut . putRequest
           putByteString addr
           putWord8 0
 
--- | Decode a Socks4 response.
---
--- XXX We just fight lazy decoding here -- we should replace `binary` with
--- `cereal`. ( See `DNS`. )
-decodeResponse :: ByteString -> IO (Maybe Response)
+-- | Decode a Socks4 response, returning @'Just' _@ if parsing succeeded. As
+-- with 'TorDNSEL.DNS.decodeMessage', decoding is total: every failure goes
+-- through 'fail' and comes back as 'Left' from 'runGetOrFail'. The response
+-- must be exactly 8 bytes long.
+decodeResponse :: ByteString -> Maybe Response
 decodeResponse resp =
   case runGetOrFail getResponse (L.fromChunks [resp]) of
-    Right (_, _, r) -> (Just $!! r) `seq` return (Just r)
-    Left _          -> return Nothing
+    Right (rest, _, r) | L.null rest -> Just $!! r
+    _                                -> Nothing
   where
     getResponse = do
       v <- getWord8

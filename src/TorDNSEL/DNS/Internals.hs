@@ -31,7 +31,6 @@ module TorDNSEL.DNS.Internals (
   , Packet(..)
   , encodeMessage
   , decodeMessage
-  , unsafeDecodeMessage
   , PutState(..)
   , initialPutState
   , PutMessage
@@ -126,19 +125,7 @@ recvMessageFrom :: Socket -> IO (Maybe Message, Int, SockAddr)
 recvMessageFrom sock = do
   -- EDNS(0) queries may be larger than 512 bytes.
   (pkt,sockAddr) <- recvFrom sock 4096
-  msg <- decodeMessage $ Packet pkt
-  return (msg, B.length pkt, sockAddr)
-
-{-
--- avoids an extra memcpy
-recvMessageFrom sock = do
-  fp <- B.mallocByteString 512
-  withForeignPtr fp $ \p -> do
-    (l,addr) <- recvBufFrom sock p 512
-    E.assert (l <= 512) $ do
-      msg <- decodeMessage . Packet $ B.PS fp 0 l
-      return (msg, l, addr)
--}
+  return (decodeMessage $ Packet pkt, B.length pkt, sockAddr)
 
 -- | Send a DNS message to a 'SockAddr' with a UDP socket. If the encoded
 -- message is larger than 512 bytes and is a response, remove any resource
@@ -181,22 +168,19 @@ newtype Packet = Packet { unPacket :: ByteString }
 encodeMessage :: Message -> Packet
 encodeMessage = Packet . B.concat . L.toChunks . runPutMessage . putPacket
 
--- | Decode a DNS message strictly, returning @'Just' _@ if parsing succeeded.
+-- | Decode a DNS message, returning @'Just' _@ if parsing succeeded. The
+-- result is fully evaluated.
 --
--- XXX We just fight lazy decoding here -- we should replace `binary` with
--- `cereal`. ( See `Socks`. )
-decodeMessage :: Packet -> IO (Maybe Message)
+-- Decoding is total: since binary 0.7 'Get' is strict and reports every
+-- failure (short input, bad lengths, bad pointers, ...) through 'fail', which
+-- 'runGetOrFail' turns into 'Left', and the decoders below use no partial
+-- functions. (The property tests check this on random input.) So there is no
+-- need to catch exceptions, and this needn't be in 'IO'.
+decodeMessage :: Packet -> Maybe Message
 decodeMessage pkt =
-  E.evaluate (force decoded) `E.catch` \(_ :: E.ErrorCall) -> return Nothing
-  where
-    decoded = case runGetOrFail (getPacket pkt) (L.fromChunks [unPacket pkt]) of
-      Left _          -> Nothing
-      Right (_, _, m) -> Just m
-
--- | Lazily decode a DNS message. If parsing fails, the result will contain an
--- exceptional value at some level.
-unsafeDecodeMessage :: Packet -> Message
-unsafeDecodeMessage pkt = runGet (getPacket pkt) (L.fromChunks [unPacket pkt])
+  case runGetOrFail (getPacket pkt) (L.fromChunks [unPacket pkt]) of
+    Left _          -> Nothing
+    Right (_, _, m) -> Just $!! m
 
 -- | A value representing the current name compression targets and current
 -- offset (in bytes) into the datagram we're serializing.
@@ -221,9 +205,10 @@ incrOffset :: Offset -> PutMessage
 incrOffset n = S.modify $ \s -> s { psCurOff = psCurOff s + n }
 
 -- | Binary serialization and deserialization of a packet. The entire packet is
--- available as context for deserialization.
+-- available as context for deserialization, since compressed domain names
+-- point back into it. (Passing it explicitly is simpler than a ReaderT over
+-- 'Get', and costs nothing.)
 class BinaryPacket a where
-  -- XXX we could use a ReaderT monad here
   getPacket :: Packet -> Get a
   putPacket :: a -> PutMessage
 

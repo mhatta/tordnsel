@@ -25,16 +25,16 @@ import Data.Binary.Get (runGet, skip)
 import TorDNSEL.DNS.Internals
 
 tests = TestList . map TestCase $
-  [ (Just q @=?) =<< decodeMessage query
-  , (Just r @=?) =<< decodeMessage aResponse
-  , (Just r' @=?) =<< decodeMessage soaResponse
-  , (Just nsr @=?) =<< decodeMessage nsResponse
-  , (Nothing @=?) =<< decodeMessage cyclicPtrs
-  , (Nothing @=?) =<< decodeMessage cyclicPtrs'
+  [ Just q @=? decodeMessage query
+  , Just r @=? decodeMessage aResponse
+  , Just r' @=? decodeMessage soaResponse
+  , Just nsr @=? decodeMessage nsResponse
+  , Nothing @=? decodeMessage cyclicPtrs
+  , Nothing @=? decodeMessage cyclicPtrs'
   , query @=? encodeMessage q
   , aResponse @=? encodeMessage r
-  , soaResponse @=? encodeMessage (unsafeDecodeMessage soaResponse)
-  , nsResponse @=? encodeMessage (unsafeDecodeMessage nsResponse)
+  , Just soaResponse @=? fmap encodeMessage (decodeMessage soaResponse)
+  , Just nsResponse @=? fmap encodeMessage (decodeMessage nsResponse)
   , compNames' @=? compNames
   , decompNames' @=? decompNames ]
 
