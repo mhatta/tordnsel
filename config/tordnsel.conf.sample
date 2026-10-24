@@ -44,6 +44,11 @@
 ## dropping privileges. Leave it commented to use the default.
 #DNSListenAddress 127.0.0.1:53
 
+## Answer at most this many queries per second over UDP from each client
+## network (IPv4 /24, IPv6 /56); see the man page. 0 means no limit. Keep it
+## well above what the recursive resolvers that use your list send.
+#DNSRateLimit 0
+
 ## The IP address that will be returned in response to requests for the A
 ## record matching our zone of authority. If you don't specify this option,
 ## no A record will be returned for the zone of authority.

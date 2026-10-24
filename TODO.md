@@ -22,7 +22,6 @@ See [ChangeLog](ChangeLog).
     `ipv6-policy` summaries; IPv6 exit tests need an IPv6 test listener)
   - [ ] accept nibble-format IPv6 addresses in queries (RFC 5782)
   - [ ] "me" queries and `/api/ip` from IPv6 hosts
-- [ ] a per-client response rate limit for DNS over UDP
 - [ ] honour X-Forwarded-For from a configured reverse proxy in the web
   interface
 - [ ] EDNS Client Subnet for "me" queries arriving through public resolvers

@@ -117,7 +117,8 @@ least, you'll need to uncomment and modify `ZoneOfAuthority`, `DomainName`,
 `SOARName`, `StateDirectory`, `RuntimeDirectory`, and probably
 `DNSListenAddress`. Delegate the zone to the host running TorDNSEL with an NS
 record in the parent zone. TorDNSEL answers over UDP and TCP on that address,
-so let both through your firewall.
+so let both through your firewall. `DNSRateLimit` limits the UDP responses to
+each client network, against reflection attacks; see the man page.
 
 To run exit tests, you'll need to specify at least `EnableActiveTesting`,
 `TestListenAddress`, and `TestDestinationAddress`. The test destination must

@@ -105,6 +105,9 @@ data Config = Config
     -- | The public address and port at which clients reach the web
     -- interface, if it differs from the listening address (e.g. behind NAT).
   , cfHTTPPublicAddress   :: Maybe (HostAddress, Port)
+    -- | Responses per second allowed over UDP to each client network, or 0
+    -- for no limit.
+  , cfDNSRateLimit        :: Int
   } deriving Show
 
 -- | Exit test configuration options.
@@ -141,7 +144,8 @@ knownConfigItems
   , "PIDFile"
   , "ExitList"
   , "HTTPListenAddress"
-  , "HTTPPublicAddress" ]
+  , "HTTPPublicAddress"
+  , "DNSRateLimit" ]
 
 -- | Config items that may be given more than once. Their values are joined
 -- with newlines.
@@ -173,7 +177,8 @@ makeConfig conf =
     "PIDFile" `app`
     "ExitList" `app`
     "HTTPListenAddress" `app`
-    "HTTPPublicAddress"
+    "HTTPPublicAddress" `ap`
+    rateLimit
   where
     conf' = M.union conf . M.fromList . map (toItem *** toItem) $
       [ "DNSListenAddress"    ~> "127.0.0.1:53"
@@ -181,9 +186,15 @@ makeConfig conf =
       , "RunAsDaemon"         ~> "False"
       , "EnableActiveTesting" ~> "False"
       , "TorSocksAddress"     ~> "127.0.0.1:9050"
-      , "Log"                 ~> "notice stdout" ]
+      , "Log"                 ~> "notice stdout"
+      , "DNSRateLimit"        ~> "0" ]
     (~>) = (,)
     f `app` addr = f `ap` parse (B.pack addr) conf'
+    rateLimit = do
+      r <- parse (B.pack "DNSRateLimit") conf'
+      if r < 0
+        then throwError ("DNSRateLimit must not be negative." ++)
+        else return (r :: Int)
     testConf = do
       concTests <- parse (B.pack "EnableActiveTesting") conf'
       if concTests

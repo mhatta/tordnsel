@@ -210,6 +210,15 @@ privileges. (Default: none, the HTTP interface is disabled)
 The IPv4 address and port at which clients reach the HTTP interface, if it
 differs from \fBHTTPListenAddress\fR (e.g. behind NAT or a port redirection).
 Used by /api/ip. (Default: the address of the listening socket)
+.TP
+\fBDNSRateLimit \fR\fINUM\fP
+Answer at most \fINUM\fR queries per second over UDP from each client
+network (an IPv4 /24 or an IPv6 /56), allowing bursts of up to \fINUM\fR
+queries. Of the queries over the limit, every second one gets a truncated
+response, so that real clients retry over TCP, and the rest are dropped. This
+keeps the server from being used to flood a spoofed address. Note that a busy
+recursive resolver sends many queries from one network, so set this well above
+what your resolvers send. TCP is not limited. (Default: 0, no limit)
 
 .SH ACTIVE TESTING OPTIONS
 The following options are only necessary if active testing through Tor exits

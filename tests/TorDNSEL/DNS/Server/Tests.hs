@@ -20,6 +20,7 @@ import Control.Concurrent (forkIO, threadDelay)
 import qualified Control.Exception as E
 import qualified Data.ByteString.Char8 as B
 import qualified Data.Map as M
+import Data.Time.Clock.POSIX (POSIXTime)
 import Network.Socket
   ( Socket, socket, Family(AF_INET), SocketType(Datagram, Stream), SockAddr(..)
   , bind, listen, accept, connect, getSocketName, close )
@@ -43,6 +44,7 @@ tests = TestList
   , TestLabel "query parsing" parsing
   , TestLabel "responses" responses
   , TestLabel "truncation" truncation
+  , TestLabel "rate limiting" rateLimiting
   , TestLabel "TCP" tcp
   ]
   where
@@ -201,6 +203,34 @@ truncation = TestCase $ do
   -- queries are never truncated
   Nothing @=? encodeResponse 20 (query name TA)
 
+-- | Token buckets per client network.
+rateLimiting :: Test
+rateLimiting = TestCase $ do
+  let run :: POSIXTime -> SockAddr -> RateLimiter -> [RateDecision]
+          -> IO RateLimiter
+      run _ _ rl [] = return rl
+      run t a rl (expected:rest) = do
+        let (d, rl') = rateLimit 2 t a rl
+        expected @=? d
+        run t a rl' rest
+      v4 x = SockAddrInet 40000 (htonl $ ip x)
+  rl1 <- run 100 (v4 "192.0.2.1") emptyRateLimiter
+           [Allow, Allow, Slip, Drop, Slip, Drop]
+  -- the same /24 shares the bucket; another network doesn't
+  rl2 <- run 100 (v4 "192.0.2.200") rl1 [Slip]
+  rl3 <- run 100 (v4 "192.0.3.1") rl2 [Allow, Allow, Slip]
+  -- half a second later, there's one token again; a second later, two
+  rl4 <- run 100.5 (v4 "192.0.2.1") rl3 [Allow, Drop]
+  _   <- run 102 (v4 "192.0.2.1") rl4 [Allow, Allow, Slip]
+  -- IPv6 clients are grouped by /56
+  let v6 b = SockAddrInet6 40000 0 (0x20010db8, b, 0, 1) 0
+  rl5 <- run 100 (v6 0x00000100) emptyRateLimiter [Allow, Allow, Slip]
+  _   <- run 100 (v6 0x000001ff) rl5 [Drop]
+  _   <- run 100 (v6 0x00000200) rl5 [Allow]
+  -- networks whose buckets have filled up again are forgotten
+  let (_, rl6) = rateLimit 2 103 (v4 "198.51.100.1") rl3
+  M.keys (rlBuckets rl6) @=? [rateKey (v4 "198.51.100.1")]
+
 -- | DNS over TCP on a real connection: pipelined queries are answered in
 -- order, and idle or broken connections are closed.
 tcp :: Test
@@ -277,6 +307,7 @@ dnsConf sock = DNSConfig
   , dnsNS = NS zone ttl (toName ["ns","example","com"])
   , dnsA = Nothing
   , dnsLists = lists
+  , dnsRateLimit = 0
   , dnsByteStats = \_ _ -> return ()
   , dnsRespStats = const $ return () }
   where zone = toName ["torhosts","example","com"]

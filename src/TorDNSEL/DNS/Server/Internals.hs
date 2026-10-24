@@ -32,7 +32,8 @@
 -- valid query exist as empty non-terminals (NOERROR with no data), which keeps
 -- resolvers using QNAME minimisation (RFC 9156) working.
 --
--- Queries are answered over UDP and TCP (RFC 7766).
+-- Queries are answered over UDP and TCP (RFC 7766). Over UDP, responses can
+-- be rate limited per client network ('rateLimit').
 --
 -----------------------------------------------------------------------------
 
@@ -42,8 +43,8 @@ module TorDNSEL.DNS.Server.Internals where
 import Prelude hiding (log)
 import qualified Control.Exception as E
 import Control.Monad (when, guard, forever)
-import Data.Bits ((.|.), shiftL)
-import Data.IORef (newIORef, atomicModifyIORef')
+import Data.Bits ((.|.), (.&.), shiftL)
+import Data.IORef (IORef, newIORef, atomicModifyIORef')
 import qualified Data.ByteString.Char8 as B
 import Data.ByteString (ByteString)
 import Data.Char (toLower, isDigit)
@@ -77,6 +78,9 @@ data DNSConfig
   , dnsA        :: !(Maybe ResourceRecord)
   -- | Operator-configured lists of destinations for \"list\" queries.
   , dnsLists    :: !NamedLists
+  -- | Responses per second allowed over UDP to each client network, or 0
+  -- for no limit (see 'rateLimit').
+  , dnsRateLimit :: !Int
   -- | An action invoked with bytes received and sent for recording statistics.
   , dnsByteStats :: !(Int -> Int -> IO ())
   -- | A statistics tracking action invoked with each response.
@@ -85,7 +89,7 @@ data DNSConfig
 instance Eq DNSConfig where
   x == y = all (\(===) -> x === y)
     [ eq dnsSocket, eq dnsTCPSocket, eq dnsAuthZone, eq dnsMyName, eq dnsSOA
-    , eq dnsNS, eq dnsA, eq dnsLists ]
+    , eq dnsNS, eq dnsA, eq dnsLists, eq dnsRateLimit ]
     where
       eq :: Eq b => (a -> b) -> a -> a -> Bool
       eq = on (==)
@@ -117,15 +121,17 @@ instance E.Exception DNSMessage
 startDNSServer :: DNSConfig -> IO DNSServer
 startDNSServer initConf = do
   log Info "Starting DNS server."
-  fmap DNSServer . forkLinkIO $ E.mask $ \restore -> loop restore initConf
+  limiter <- newIORef emptyRateLimiter
+  fmap DNSServer . forkLinkIO $ E.mask $ \restore -> loop limiter restore initConf
   where
-    loop :: (forall a. IO a -> IO a) -> DNSConfig -> IO ()
-    loop restore conf = do
+    loop :: IORef RateLimiter -> (forall a. IO a -> IO a) -> DNSConfig -> IO ()
+    loop limiter restore conf = do
       -- The TCP server runs in its own thread for the current config, and is
       -- restarted whenever we're reconfigured.
       tcp <- forkIO . restore $ runTCPServer restore conf
       r <- E.tryJust fromExitSignal . restore $
-             runServer (dnsSocket conf) (dnsByteStats conf) (dnsHandler conf)
+             runServer (dnsSocket conf) (dnsByteStats conf)
+                       (dnsUDPHandler limiter conf)
       killThread tcp
       case r of
         Left (_,Reconfigure reconf signal) -> do
@@ -137,11 +143,11 @@ startDNSServer initConf = do
           when (dnsTCPSocket conf /= dnsTCPSocket newConf) $
             closeSocket $ dnsTCPSocket conf
           signal
-          loop restore newConf
+          loop limiter restore newConf
         Left (_,Terminate reason) -> do
           log Info "Terminating DNS server."
           exit reason
-        Right _ -> loop restore conf -- impossible
+        Right _ -> loop limiter restore conf -- impossible
 
 -- | Reconfigure the DNS server synchronously with the given function. If the
 -- server exits abnormally before reconfiguring itself, throw its exit signal in
@@ -198,6 +204,24 @@ maxTCPConnections = 128
 -- | How long, in microseconds, a DNS over TCP connection may be idle.
 tcpIdleTimeout :: Int
 tcpIdleTimeout = 10 * 1000000
+
+-- | 'dnsHandler' with the per-client rate limit applied, for UDP.
+dnsUDPHandler
+  :: IORef RateLimiter -> DNSConfig -> SockAddr -> Message -> IO (Maybe Message)
+dnsUDPHandler limiter conf src msg
+  | dnsRateLimit conf <= 0 || msgQR msg = dnsHandler conf src msg
+  | otherwise = do
+      now <- getPOSIXTime
+      decision <- atomicModifyIORef' limiter $ \rl ->
+        let (d, rl') = rateLimit (dnsRateLimit conf) now src rl in (rl', d)
+      case decision of
+        Allow -> dnsHandler conf src msg
+        -- A truncated response makes a real client retry over TCP, which
+        -- can't be spoofed; it's no bigger than the query.
+        Slip  -> return . Just . truncateMessage $
+                   msg { msgQR = True, msgAA = False, msgRA = False
+                       , msgAD = False, msgAdditional = [] }
+        Drop  -> return Nothing
 
 -- | A stateful wrapper for 'dnsResponse'.
 dnsHandler :: DNSConfig -> SockAddr -> Message -> IO (Maybe Message)
@@ -450,3 +474,69 @@ parseExitListQuery lists labels = case map (B.map toLower . unLabel) labels of
 -- | The time-to-live set for caching.
 ttl :: Word32
 ttl = 30 * 60
+
+--------------------------------------------------------------------------------
+-- Rate limiting
+
+-- | What to do with a query from a client that may be over its rate limit.
+data RateDecision
+  = Allow -- ^ Answer it.
+  | Slip  -- ^ Send a truncated response, so that a real client retries
+          --   over TCP.
+  | Drop  -- ^ Don't answer.
+  deriving (Eq, Show)
+
+-- | The clients we've seen recently: a token bucket per client network.
+data RateLimiter = RateLimiter
+  { rlBuckets   :: !(M.Map RateKey Bucket)
+  , rlLastPurge :: !POSIXTime }
+
+-- | A client network: an IPv4 /24 or an IPv6 /56. Rate limiting by network
+-- rather than by address stops an attacker from spreading spoofed queries
+-- over neighbouring addresses, as other response rate limiting schemes do.
+data RateKey = Net4 !Word32 | Net6 !Word32 !Word32
+  deriving (Eq, Ord, Show)
+
+-- | Tokens left, when they were last counted, and how many queries have been
+-- refused since then.
+data Bucket = Bucket !Double !POSIXTime !Int
+  deriving Show
+
+-- | No clients seen.
+emptyRateLimiter :: RateLimiter
+emptyRateLimiter = RateLimiter M.empty 0
+
+-- | Given the number of responses per second allowed to each client network,
+-- the current time and a query's source, decide what to do with the query.
+--
+-- Each network may send bursts of up to @rate@ queries and @rate@ queries per
+-- second on average. Of the queries over the limit, every second one is
+-- answered with a truncated response ('Slip') and the rest are dropped: a
+-- spoofed flood is then reflected at a fraction of its own size, while real
+-- clients still get through over TCP (cf. BIND's RRL "slip 2").
+rateLimit :: Int -> POSIXTime -> SockAddr -> RateLimiter -> (RateDecision, RateLimiter)
+rateLimit rate now src (RateLimiter buckets lastPurge) =
+  (decision, RateLimiter (M.insert key bucket' buckets') lastPurge')
+  where
+    rate' = fromIntegral rate :: Double
+    key = rateKey src
+    Bucket tokens _ refused = refill now $
+      M.findWithDefault (Bucket rate' now 0) key buckets
+    (decision, bucket')
+      | tokens >= 1  = (Allow, Bucket (tokens - 1) now refused)
+      | even refused = (Slip,  Bucket tokens now (refused + 1))
+      | otherwise    = (Drop,  Bucket tokens now (refused + 1))
+    refill t (Bucket k t0 n) =
+      Bucket (min rate' (k + rate' * realToFrac (t - t0))) t n
+    -- Forget networks whose buckets are full again, at most once a second.
+    (buckets', lastPurge')
+      | now - lastPurge >= 1 =
+          (M.filter (\b -> not (full (refill now b))) buckets, now)
+      | otherwise = (buckets, lastPurge)
+    full (Bucket k _ _) = k >= rate'
+
+-- | The client network an address belongs to.
+rateKey :: SockAddr -> RateKey
+rateKey (SockAddrInet _ addr)            = Net4 (ntohl addr .&. 0xffffff00)
+rateKey (SockAddrInet6 _ _ (a, b, _, _) _) = Net6 a (b .&. 0xffffff00)
+rateKey _                                = Net4 0
