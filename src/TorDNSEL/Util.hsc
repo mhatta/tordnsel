@@ -386,18 +386,10 @@ unsnoc :: ByteString -> Maybe (ByteString, Char)
 unsnoc bs | B.null bs = Nothing
           | otherwise = Just (B.init bs, B.last bs)
 
--- | Try an action, catching -- roughly -- "synchronous" exceptions.
---
--- XXX This is a remnant of the original code base; it's actually impossible to
--- determine if an exception was thrown synchronously just by its type. Usage of
--- this and derived combinators should be pruned in favour of only handling
--- per-use-site expected exceptions.
---
+-- | Try an action, catching every exception except asynchronous ones (see
+-- 'syncExceptions').
 trySync :: IO a -> IO (Either E.SomeException a)
-trySync = E.tryJust $ \e ->
-  case E.fromException (e :: E.SomeException) of
-       Just (_ :: E.AsyncException) -> Nothing
-       _                            -> Just e
+trySync = E.tryJust syncExceptions
 
 -- | Like 'E.bracket', but if cleanup re-throws while handling a throw, don't
 -- eat the original exception.
@@ -427,13 +419,21 @@ onException' :: IO a -> IO b -> IO a
 onException' io act = io `E.catch` \e ->
   trySync act >> E.throwIO (e :: E.SomeException)
 
--- | A predicate matching synchronous exceptions.
--- XXX This is a bad idea. The exn itself conveys no info on how it was thrown.
+-- | A predicate matching exceptions that aren't asynchronous.
+--
+-- Strictly speaking, the type of an exception doesn't say how it was thrown,
+-- but by convention (since base 4.7) exceptions meant to be thrown to other
+-- threads are wrapped in 'E.SomeAsyncException': 'E.ThreadKilled' and
+-- 'E.UserInterrupt' ('E.AsyncException') and the exception of
+-- 'System.Timeout.timeout'. Those must never be swallowed. (This replaces
+-- matching on @show e == \"<<timeout>>\"@; the result is the same.)
+--
+-- The exit signals of "TorDNSEL.Control.Concurrent.Link" are ordinary
+-- exceptions, so they still count as synchronous here, as before.
 syncExceptions :: E.SomeException -> Maybe E.SomeException
 syncExceptions e
-  | show e == "<<timeout>>"                           = Nothing
-  | Just (_ :: E.AsyncException) <- E.fromException e = Nothing
-  | otherwise                                         = Just e
+  | Just (_ :: E.SomeAsyncException) <- E.fromException e = Nothing
+  | otherwise                                             = Just e
 
 -- | Print a usage message to the given handle and exit with the given code.
 exitUsage :: Handle -> ExitCode -> IO a
