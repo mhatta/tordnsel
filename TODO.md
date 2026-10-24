@@ -15,6 +15,12 @@ See [ChangeLog](ChangeLog).
 - [x] more input validation on DNS queries
 - [x] an end-to-end test against a chutney network
 
+## Done in 0.2.2
+
+- [x] SAFECOOKIE authentication to the control port
+- [x] DNS over TCP (RFC 7766) and a per-client response rate limit for UDP
+- [x] property tests for the parsers of untrusted input
+
 ## Still to do
 
 - [ ] IPv6

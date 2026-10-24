@@ -1,3 +1,38 @@
+0.2.2 - 2026-10-24
+  o Security:
+    - Authenticate to Tor's control port with SAFECOOKIE when Tor offers it
+      (whenever cookie authentication is on), so that the cookie itself is
+      never sent, and refuse to authenticate if Tor can't prove it knows the
+      cookie. Needs cryptohash-sha256.
+    - New option DNSRateLimit: answer at most that many UDP queries per
+      second from each client network (IPv4 /24, IPv6 /56); of the queries
+      over the limit, every second one gets a truncated response and the
+      rest are dropped. Off by default.
+
+  o DNS:
+    - Answer over TCP too (RFC 7766), on the same address as UDP: queries
+      may be pipelined; at most 128 connections, each closed after 10 idle
+      seconds. Firewalls must let TCP to DNSListenAddress through.
+    - UDP responses may be as large as the client's EDNS(0) payload size
+      (at most 1232 bytes); larger ones are truncated (TC bit) instead of
+      being replaced by SERVFAIL, so that clients retry over TCP.
+    - Answer QCLASS * queries like class IN ones instead of with NXDOMAIN.
+
+  o Internals:
+    - DNS and SOCKS decoding are pure and total, instead of catching
+      exceptions in IO.
+    - The main thread and the network state manager use the strict StateT.
+    - Asynchronous exceptions are recognised by SomeAsyncException.
+    - ADDRMAP events: take the expiry from EXPIRES (UTC), not local time.
+
+  o Testing:
+    - QuickCheck properties for the DNS decoder (arbitrary and damaged
+      input, round trips), the SOCKS and AUTHCHALLENGE parsers and the rate
+      limiter. Needs QuickCheck.
+    - Unit tests for DNS over TCP on real loopback connections, truncation,
+      rate limiting, SAFECOOKIE and ADDRMAP; the integration test asks over
+      TCP too.
+
 0.2.1 - 2026-10-23
   o Building:
     - Don't derive Typeable, which GHC 9.12 and newer warn about.
