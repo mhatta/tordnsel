@@ -23,7 +23,6 @@ See [ChangeLog](ChangeLog).
   - [ ] accept nibble-format IPv6 addresses in queries (RFC 5782)
   - [ ] "me" queries and `/api/ip` from IPv6 hosts
 - [ ] DNS over TCP (RFC 7766), and perhaps a per-client response rate limit
-- [ ] SAFECOOKIE authentication to the control port
 - [ ] honour X-Forwarded-For from a configured reverse proxy in the web
   interface
 - [ ] EDNS Client Subnet for "me" queries arriving through public resolvers

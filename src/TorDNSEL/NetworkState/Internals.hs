@@ -80,7 +80,7 @@ import Data.Time (UTCTime, getCurrentTime, diffUTCTime)
 import Network.Socket
   ( HostAddress, SockAddr, Socket, Family(AF_INET), SocketType(Stream)
   , socket, connect, socketToHandle )
-import System.IO (IOMode(ReadWriteMode))
+import System.IO (Handle, IOMode(ReadWriteMode))
 import System.IO.Unsafe (unsafePerformIO)
 
 import TorDNSEL.Control.Concurrent.Link
@@ -92,6 +92,7 @@ import TorDNSEL.ExitTest.Server
 import TorDNSEL.Log
 import TorDNSEL.NetworkState.Storage
 import TorDNSEL.NetworkState.Types
+import TorDNSEL.Random (randBytes)
 import TorDNSEL.TorControl
 import TorDNSEL.Util
 
@@ -115,6 +116,9 @@ data NetworkStateManagerConfig = NetworkStateManagerConfig
     nsmcfTorControlPasswd :: !(Maybe ByteString),
     -- | Where to store exit test results.
     nsmcfStateDir         :: !FilePath,
+    -- | A handle to the random number device, for the nonce of SAFECOOKIE
+    -- authentication.
+    nsmcfRandom           :: !Handle,
     -- | The exit test configuration, if exit tests are enabled.
     nsmcfExitTestConfig   :: !(Maybe ExitTestConfig) } deriving Eq
 
@@ -511,7 +515,8 @@ startTorController net conf mbDelay = liftIO $ do
       connect sock $ nsmcfTorControlAddr conf
       bracketOnError'
         ( socketToHandle sock ReadWriteMode >>=
-            (`openConnection` nsmcfTorControlPasswd conf) )
+            \h -> openConnection h (nsmcfTorControlPasswd conf)
+                                 (randBytes (nsmcfRandom conf)) )
         closeConnection $ \conn -> do
           setConfWithRollback fetchUselessDescriptors (Just True) conn
           when (torVersion (protocolInfo conn) >= TorVersion 0 2 0 13 B.empty) $

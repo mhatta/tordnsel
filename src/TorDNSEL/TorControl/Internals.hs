@@ -40,6 +40,8 @@ module TorDNSEL.TorControl.Internals (
   , Command(..)
   , Reply(..)
   , authenticate
+  , safeCookieHashes
+  , parseAuthChallenge
   , Feature(..)
   , useFeature
   , getDescriptor
@@ -145,6 +147,9 @@ import Control.Monad (when, unless, liftM, mzero, mplus)
 import Control.Monad.Except (MonadError(..))
 import Control.Monad.Fix (fix)
 import Control.Monad.State (StateT(StateT), get, put, lift, evalStateT)
+import qualified Crypto.Hash.SHA256 as SHA256
+import Data.Bits (xor, (.|.))
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as B
 import Data.ByteString (ByteString)
 import Data.Char (isSpace, isAlphaNum, isDigit, isAlpha, toLower)
@@ -194,17 +199,22 @@ toConn' (Conn tellIOManager ioManagerTid _ _) = (tellIOManager, ioManagerTid)
 data ConfSetting = forall a b. (ConfVal b, SameConfVal a b) =>
   ConfSetting (ConfVar a b) (Maybe b)
 
--- | Open a connection with a handle and an optional password and pass it to an
--- 'IO' action. If an exception interrupts execution, close the connection
--- gracefully before re-throwing the exception.
-withConnection :: Handle -> Maybe ByteString -> (Connection -> IO a) -> IO a
-withConnection handle mbPasswd =
-  bracket' (openConnection handle mbPasswd) closeConnection
+-- | Open a connection with a handle, an optional password and a source of
+-- random bytes (see 'authenticate') and pass it to an 'IO' action. If an
+-- exception interrupts execution, close the connection gracefully before
+-- re-throwing the exception.
+withConnection
+  :: Handle -> Maybe ByteString -> (Int -> IO ByteString) -> (Connection -> IO a)
+  -> IO a
+withConnection handle mbPasswd getRandBytes =
+  bracket' (openConnection handle mbPasswd getRandBytes) closeConnection
 
--- | Open a connection with a handle and an optional password. Throw a
--- 'TorControlError' or 'IOError' if initializing the connection fails.
-openConnection :: Handle -> Maybe ByteString -> IO Connection
-openConnection handle mbPasswd = do
+-- | Open a connection with a handle, an optional password and a source of
+-- random bytes (see 'authenticate'). Throw a 'TorControlError' or 'IOError'
+-- if initializing the connection fails.
+openConnection
+  :: Handle -> Maybe ByteString -> (Int -> IO ByteString) -> IO Connection
+openConnection handle mbPasswd getRandBytes = do
   hSetBuffering handle LineBuffering
   conn@(tellIOManager,ioManagerTid) <- startIOManager handle
   confSettings <- newMVar []
@@ -216,7 +226,7 @@ openConnection handle mbPasswd = do
                           (parseProtocolInfo rs)
 
        let conn' = Conn tellIOManager ioManagerTid protInfo confSettings
-       authenticate mbPasswd conn'
+       authenticate mbPasswd getRandBytes conn'
        useFeature [VerboseNames] conn'
        return conn'
     ) `onException'` closeConnection' conn confSettings
@@ -271,17 +281,94 @@ data Reply = Reply
 
 -- | Authenticate with Tor. Throw a 'TorControlError' if authenticating fails
 -- or an 'IOError' if reading the authentication cookie fails.
-authenticate :: Maybe ByteString -> Connection -> IO ()
-authenticate mbPasswd conn = do
+--
+-- Methods are tried in this order: none needed, the configured password, then
+-- the cookie. When Tor offers SAFECOOKIE we use it rather than COOKIE: with
+-- COOKIE we would send the cookie itself, so anything listening on the
+-- control port (e.g. something that won the race for the port after Tor died)
+-- would learn it. With SAFECOOKIE both sides prove knowledge of the cookie
+-- without revealing it. @getRandBytes@ supplies the client nonce.
+authenticate
+  :: Maybe ByteString -> (Int -> IO ByteString) -> Connection -> IO ()
+authenticate mbPasswd getRandBytes conn = do
   let methods = authMethods $ protocolInfo conn
-  secret <- fmap encodeBase16 `fmap` case () of
+  secret <- case () of
    _| nullAuth methods                            -> return Nothing
-    | hashedPasswordAuth methods, isJust mbPasswd -> return mbPasswd
-    | Just cookiePath <- cookieAuth methods -> Just `fmap` B.readFile cookiePath
+    | hashedPasswordAuth methods, Just _ <- mbPasswd
+    -> return $ encodeBase16 `fmap` mbPasswd
+    | Just cookiePath <- cookieAuth methods, safeCookieAuth methods
+    -> Just `fmap` (B.readFile cookiePath >>= safeCookie)
+    | Just cookiePath <- cookieAuth methods
+    -> (Just . encodeBase16) `fmap` B.readFile cookiePath
     | otherwise                                   -> return Nothing
   let authCommand = Command (B.pack "authenticate") (maybeToList secret) []
   sendCommand authCommand False Nothing conn
     >>= throwIfNotPositive authCommand { comArgs = [B.pack "[scrubbed]"] } . head
+  where
+    safeCookie cookie = do
+      clientNonce <- getRandBytes nonceLength
+      let challenge = Command (B.pack "authchallenge")
+                        [B.pack "SAFECOOKIE", encodeBase16 clientNonce] []
+      r:_ <- sendCommand challenge False Nothing conn
+      throwIfNotPositive challenge r
+      (serverHash, serverNonce) <-
+        either (protocolError challenge) return (parseAuthChallenge (repText r))
+      let (expected, clientHash) =
+            safeCookieHashes cookie clientNonce serverNonce
+      -- If Tor doesn't know the cookie, we're not talking to the Tor that
+      -- wrote it: don't send it anything derived from the cookie.
+      unless (constantTimeEq expected serverHash) $
+        protocolError challenge
+          ("Tor's SERVERHASH doesn't match our cookie; not authenticating." ++)
+      return $! encodeBase16 clientHash
+    nonceLength = 32
+
+-- | Given the authentication cookie, the client nonce and the server nonce,
+-- the hash Tor must send us and the one we must send Tor in SAFECOOKIE
+-- authentication (control-spec, AUTHCHALLENGE).
+safeCookieHashes
+  :: ByteString -> ByteString -> ByteString -> (ByteString, ByteString)
+safeCookieHashes cookie clientNonce serverNonce =
+  (hmac serverKey, hmac clientKey)
+  where
+    msg = B.concat [cookie, clientNonce, serverNonce]
+    hmac key = SHA256.hmac key msg
+    serverKey = B.pack "Tor safe cookie authentication server-to-controller hash"
+    clientKey = B.pack "Tor safe cookie authentication controller-to-server hash"
+
+-- | Parse the text of a reply to AUTHCHALLENGE, returning the decoded
+-- server hash and server nonce. 'throwError' in the monad if parsing fails.
+parseAuthChallenge
+  :: MonadError ShowS m => ByteString -> m (ByteString, ByteString)
+parseAuthChallenge text
+  | w:args <- B.words text, w == B.pack "AUTHCHALLENGE"
+  , Just hash  <- lookup (B.pack "SERVERHASH") (map keyValue args)
+  , Just nonce <- lookup (B.pack "SERVERNONCE") (map keyValue args)
+  , Just hash' <- decodeHex hash, BS.length hash' == 32
+  , Just nonce' <- decodeHex nonce, BS.length nonce' == 32
+  = return (hash', nonce')
+  | otherwise = throwError $ cat "Malformed AUTHCHALLENGE reply "
+                                 (esc maxLen text) '.'
+  where
+    keyValue = second (B.drop 1) . B.break (== '=')
+    maxLen = 256
+
+-- | Decode an even-length string of hexadecimal digits.
+decodeHex :: ByteString -> Maybe ByteString
+decodeHex hex
+  | even (B.length hex), B.all isHexDigit' hex
+  = Just . BS.pack . map pair . split 2 $ hex
+  | otherwise = Nothing
+  where
+    isHexDigit' c = isDigit c || toLower c `elem` "abcdef"
+    pair p = fromIntegral (digit (B.head p) * 16 + digit (B.last p))
+    digit c | isDigit c = fromEnum c - fromEnum '0'
+            | otherwise = fromEnum (toLower c) - fromEnum 'a' + 10
+
+-- | Compare two strings in time that depends only on their lengths.
+constantTimeEq :: ByteString -> ByteString -> Bool
+constantTimeEq a b =
+  BS.length a == BS.length b && BS.foldl' (.|.) 0 (BS.pack (BS.zipWith xor a b)) == 0
 
 -- | Control protocol extensions
 data Feature = ExtendedEvents -- ^ Extended event syntax
@@ -939,7 +1026,9 @@ parseTorVersion bs
 -- | Authentication methods accepted by Tor.
 data AuthMethods = AuthMethods
   { nullAuth                     -- ^ No authentication is required
-  , hashedPasswordAuth :: Bool   -- ^ The original password must be supplied
+  , hashedPasswordAuth           -- ^ The original password must be supplied
+  , safeCookieAuth :: Bool       -- ^ Knowledge of the cookie may be proven
+                                 --   with AUTHCHALLENGE (SAFECOOKIE)
   , cookieAuth :: Maybe FilePath -- ^ The contents of a cookie must be supplied
   } deriving Show
 
@@ -969,6 +1058,7 @@ parseProtocolInfo (Reply _ text _:rs)
       return $! ProtocolInfo version AuthMethods
         { nullAuth           = B.pack "NULL" `elem` methods
         , hashedPasswordAuth = B.pack "HASHEDPASSWORD" `elem` methods
+        , safeCookieAuth     = B.pack "SAFECOOKIE" `elem` methods
         , cookieAuth         = B.unpack `liftM` cookiePath }
   where
     findPrefix prefix

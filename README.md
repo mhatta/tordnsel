@@ -82,7 +82,7 @@ without Hackage access, using the Setup script:
 
 ```sh
 apt-get install ghc libghc-network-dev libghc-conduit-dev \
-  libghc-conduit-extra-dev libghc-hunit-dev
+  libghc-conduit-extra-dev libghc-cryptohash-sha256-dev libghc-hunit-dev
 runhaskell Setup.hs configure --enable-tests
 runhaskell Setup.hs build
 runhaskell Setup.hs test
@@ -103,7 +103,10 @@ SocksPort 9050
 ```
 
 The cookie file must be readable by the TorDNSEL user (or use
-`HashedControlPassword` with TorDNSEL's `TorControlPassword`). TorDNSEL turns
+`HashedControlPassword` with TorDNSEL's `TorControlPassword`). When Tor offers
+SAFECOOKIE (it does whenever cookie authentication is on), TorDNSEL uses it
+instead of sending the cookie itself, and refuses to authenticate if Tor
+can't prove it knows the cookie too. TorDNSEL turns
 on `FetchUselessDescriptors` and `FetchDirInfoEarly` while it is connected, so
 that Tor downloads every router descriptor.
 

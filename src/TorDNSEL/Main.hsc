@@ -374,7 +374,7 @@ runMainThread static initTestListeners initDNSListener initHTTPListener
     let cleanup = terminateReconfigServer Nothing initReconfig
     stats <- startStatsServer (statsSocket static) `E.onException` cleanup
     let cleanup' = cleanup >> terminateStatsServer Nothing stats
-    netState <- initializeNetworkStateManager
+    netState <- initializeNetworkStateManager static
                   (mkExitTestConfig static initTestListeners initConf) initConf
       `E.onException` cleanup'
     dns <- startDNSServer (mkDNSServerConfig initDNSListener initConf)
@@ -501,7 +501,7 @@ handleMessage mainChan static conf s (Exit tid reason)
   | tid == threadId (networkStateManager s) = do
       log Warn "The network state manager thread exited unexpectedly: "
                (show reason) "; restarting."
-      newManager <- initializeNetworkStateManager
+      newManager <- initializeNetworkStateManager static
                       (mkExitTestConfig static (exitTestListeners s) conf) conf
         `E.catch` \(e :: E.SomeException) -> do
           log Error "Restarting network state manager failed: " e
@@ -575,12 +575,14 @@ initializeLogger conf = do
 
 -- | Start the network state manager thread.
 initializeNetworkStateManager
-  :: (TestConfig -> ExitTestConfig) -> Config -> IO NetworkStateManager
-initializeNetworkStateManager exitTestConfig conf = do
+  :: StaticState -> (TestConfig -> ExitTestConfig) -> Config
+  -> IO NetworkStateManager
+initializeNetworkStateManager static exitTestConfig conf = do
   startNetworkStateManager NetworkStateManagerConfig
     { nsmcfTorControlAddr = cfTorControlAddress conf
     , nsmcfTorControlPasswd = cfTorControlPassword conf
     , nsmcfStateDir = cfStateDirectory conf
+    , nsmcfRandom = randomHandle static
     , nsmcfExitTestConfig = exitTestConfig `fmap` cfTestConfig conf }
 
 -- | Reconfigure the logger if it's running, or attempt to restart it if it's

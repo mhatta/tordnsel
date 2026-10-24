@@ -28,9 +28,11 @@ import TorDNSEL.NetworkState.Internals
   (newConsensus, exitMappingName)
 import TorDNSEL.NetworkState.Types
 import TorDNSEL.TorControl.Internals
+import TorDNSEL.Util (encodeBase16)
 
 tests :: Test
-tests = TestList [protocolInfo', replies, consensusEvent, consensus, mapping]
+tests = TestList [ protocolInfo', safeCookie, authChallenge, replies
+                 , consensusEvent, consensus, mapping ]
 
 -- | The PROTOCOLINFO reply of Tor 0.4.9.6 with cookie authentication.
 protocolInfo' :: Test
@@ -46,6 +48,38 @@ protocolInfo' = TestCase $ do
       TorVersion 0 4 9 6 "" @=? torVersion pi'
       Just "/var/run/tor/control.authcookie" @=? cookieAuth (authMethods pi')
       False @=? nullAuth (authMethods pi')
+      True  @=? safeCookieAuth (authMethods pi')
+
+-- | SAFECOOKIE hashes, checked against Python's hmac module:
+--
+-- > hmac.new(key, bytes(range(32)) + b'\xaa' * 32 + b'\x55' * 32,
+-- >          hashlib.sha256).hexdigest()
+safeCookie :: Test
+safeCookie = TestCase $ do
+  let cookie = B.pack (map toEnum [0..31])
+      (server, client) = safeCookieHashes cookie (B.replicate 32 '\xaa')
+                                                 (B.replicate 32 '\x55')
+  "5f7cb5569957c99373e329258545940f029af175da225f4a3125eebf30c24bba"
+    @=? encodeBase16 server
+  "9f99f2c4b75c91123ca5c6c6e3f76a9ef7fbd9471053cbe34454a4269cc39f7c"
+    @=? encodeBase16 client
+
+-- | Parsing Tor's reply to AUTHCHALLENGE.
+authChallenge :: Test
+authChallenge = TestCase $ do
+  let hash  = B.replicate 64 'A'
+      nonce = B.replicate 64 '0'
+      ok    = B.concat ["AUTHCHALLENGE SERVERHASH=", hash, " SERVERNONCE=", nonce]
+  Right (B.replicate 32 '\xaa', B.replicate 32 '\0')
+    @=? either (Left . ($ "")) Right (parseAuthChallenge ok)
+  mapM_ (\t -> isLeft' (parseAuthChallenge t) @? ("accepted " ++ B.unpack t))
+    [ "AUTHCHALLENGE SERVERHASH=" `B.append` hash
+    , B.concat ["AUTHCHALLENGE SERVERHASH=", B.take 62 hash, " SERVERNONCE=", nonce]
+    , B.concat ["AUTHCHALLENGE SERVERHASH=", B.take 63 hash, "x SERVERNONCE=", nonce]
+    , B.concat ["SOMETHING SERVERHASH=", hash, " SERVERNONCE=", nonce] ]
+  where
+    isLeft' :: Either ShowS a -> Bool
+    isLeft' = either (const True) (const False)
 
 -- | Raw control port output, including an asynchronous NEWCONSENSUS event
 -- interleaved with command replies.

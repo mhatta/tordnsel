@@ -79,7 +79,10 @@ The results of active exit tests.
 .SH TOR CONFIGURATION
 \fBtordnsel\fR needs a \fBtor\fR client with a \fBControlPort\fR (and, for
 active testing, a \fBSocksPort\fR). Cookie and hashed password authentication
-are supported. \fBtordnsel\fR sets \fBFetchUselessDescriptors\fR and
+are supported. With cookie authentication, the SAFECOOKIE method is used when
+\fBtor\fR offers it, so that the cookie itself is never sent, and
+\fBtordnsel\fR stops if \fBtor\fR cannot prove that it knows the cookie.
+\fBtordnsel\fR sets \fBFetchUselessDescriptors\fR and
 \fBFetchDirInfoEarly\fR for the lifetime of its connection, so that \fBtor\fR
 downloads every router descriptor; their original values are restored when
 \fBtordnsel\fR disconnects. Active tests are routed through particular exits with
