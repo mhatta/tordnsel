@@ -50,7 +50,11 @@ the host that sent the query. Note that if the query comes through a recursive
 resolver, that resolver is the host in question. Answers have a TTL of zero so
 that resolvers don't hand them to other clients.
 .PP
-Other answers are cached for 30 minutes. EDNS(0) is supported.
+Other answers are cached for 30 minutes. EDNS(0) is supported. Queries are
+answered over UDP and TCP (RFC 7766); UDP responses too large for the client
+are truncated (TC bit set) so that it retries over TCP. Up to 128 TCP
+connections are served at a time, each closed after 10 seconds without a
+query.
 
 .SH HTTP INTERFACE
 When \fBHTTPListenAddress\fR is set, the same data is available over HTTP
@@ -142,10 +146,10 @@ The following options either have sensible default values or can be left
 unspecified:
 .TP
 \fBDNSListenAddress \fR\fIIPADDR\fR:\fIPORT\fP
-Bind the name server to this IP address and UDP port. If you want to bind to all
-interfaces, set \fIIPADDR\fR to "0.0.0.0". IPv6 addresses are written in
-brackets, e.g. "[::]:53". This port is bound before dropping privileges.
-(Default: 127.0.0.1:53)
+Bind the name server to this IP address and port, both UDP and TCP. If you
+want to bind to all interfaces, set \fIIPADDR\fR to "0.0.0.0". IPv6 addresses
+are written in brackets, e.g. "[::]:53". The ports are bound before dropping
+privileges. (Default: 127.0.0.1:53)
 .TP
 \fBAddress \fR\fIIPADDR\fP
 Return \fIIPADDR\fR in response to requests for the A record matching the

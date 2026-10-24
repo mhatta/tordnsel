@@ -21,6 +21,10 @@ module TorDNSEL.DNS (
     runServer
   , recvMessageFrom
   , sendMessageTo
+  , serveTCPConnection
+  , udpPayloadLimit
+  , encodeResponse
+  , truncateMessage
 
   -- * Data types
   , Message(..)

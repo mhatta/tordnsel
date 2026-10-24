@@ -116,7 +116,8 @@ Copy [config/tordnsel.conf.sample](config/tordnsel.conf.sample). At the very
 least, you'll need to uncomment and modify `ZoneOfAuthority`, `DomainName`,
 `SOARName`, `StateDirectory`, `RuntimeDirectory`, and probably
 `DNSListenAddress`. Delegate the zone to the host running TorDNSEL with an NS
-record in the parent zone.
+record in the parent zone. TorDNSEL answers over UDP and TCP on that address,
+so let both through your firewall.
 
 To run exit tests, you'll need to specify at least `EnableActiveTesting`,
 `TestListenAddress`, and `TestDestinationAddress`. The test destination must

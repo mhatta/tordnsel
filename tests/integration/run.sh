@@ -92,8 +92,10 @@ check() {
   fi
 }
 
-dns() { # dns NAME [TYPE] -> "STATUS answers..."
-  dig +norec +time=2 +tries=2 -p "$dns_port" @127.0.0.1 "$1" "${2:-A}" |
+dns() { # dns NAME [TYPE [DIG-OPTIONS...]] -> "STATUS answers..."
+  local name=$1 type=${2:-A}
+  shift; [ $# -gt 0 ] && shift
+  dig +norec +time=2 +tries=2 "$@" -p "$dns_port" @127.0.0.1 "$name" "$type" |
     awk '/status:/ { s = $6; sub(",", "", s) }
          /^[^;].*IN[ \t]+(A|TXT)[ \t]/ { a = a " " $NF }
          END { print s a }'
@@ -249,6 +251,15 @@ echo "DNS, misc"
 check "outside our zone"                    "REFUSED"           "$(dns example.org)"
 check "EDNS(0) is echoed" "udp: 1232" \
   "$(dig +norec -p "$dns_port" @127.0.0.1 $z SOA | grep -o 'udp: [0-9]*')"
+
+echo "DNS over TCP"
+check "exit A, port 80"                     "NOERROR 127.0.0.2" "$(dns 11.0.200.10.80.7.100.51.198.ip-port.$z A +tcp)"
+check "exit C, port 80 rejected"            "NXDOMAIN"          "$(dns 13.0.200.10.80.7.100.51.198.ip-port.$z A +tcp)"
+check "three queries on one connection" "3" \
+  "$(dig +norec +tcp +keepopen -p "$dns_port" @127.0.0.1 \
+       11.0.200.10.80.7.100.51.198.ip-port.$z A \
+       13.0.200.10.ircnet.list.$z A \
+       13.0.200.10.80.7.100.51.198.ip-port.$z A | grep -c 'status: [A-Z]*')"
 
 echo "HTTP"
 check "/api/v1/ip-port" \

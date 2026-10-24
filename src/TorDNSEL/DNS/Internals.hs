@@ -27,6 +27,16 @@ module TorDNSEL.DNS.Internals (
   , recvFrom
   , sendTo
 
+  -- ** TCP
+  , serveTCPConnection
+  , recvExactly
+  , tcpFrame
+
+  -- ** Message size
+  , udpPayloadLimit
+  , encodeResponse
+  , truncateMessage
+
   -- * Serialization
   , Packet(..)
   , encodeMessage
@@ -65,7 +75,8 @@ module TorDNSEL.DNS.Internals (
   ) where
 
 import qualified Control.Exception as E
-import Control.Monad (when, unless, replicateM, liftM2, liftM3, forM, forever)
+import Control.Monad
+  (when, unless, replicateM, liftM2, liftM3, forM, forever, join)
 import qualified Control.Monad.State as S
 import Control.Monad.Trans (lift)
 import Control.DeepSeq
@@ -79,8 +90,10 @@ import qualified Data.Map as M
 import Data.Map (Map)
 import Network.Socket
   (HostAddress, Socket, SockAddr(..), sendBufTo, recvBufFrom)
+import qualified Network.Socket.ByteString as NSB
 import Foreign.ForeignPtr (withForeignPtr)
 import Foreign.Ptr (plusPtr)
+import System.Timeout (timeout)
 
 import Data.Binary (Binary(..), Get, getWord8, putWord8, Word16, Word32)
 import Data.Binary.Get
@@ -95,7 +108,9 @@ import TorDNSEL.Util
 -- I/O
 
 -- | Run a DNS server using a bound UDP socket. Pass received messages to the
--- handler and send back responses returned by the handler.
+-- handler and send back responses returned by the handler. Responses that
+-- don't fit in what the query allows ('udpPayloadLimit') are truncated, which
+-- tells the client to ask again over TCP.
 runServer
   :: Socket -> (Int -> Int -> IO ()) -> (SockAddr -> Message -> IO (Maybe Message))
   -> IO ()
@@ -112,7 +127,7 @@ runServer sock stats handler = forever $ do
       | Just port <- sourcePort sockAddr, port >= 1024 = do
           response <- handler sockAddr query
           case response of
-            Just r  -> sendMessageTo sock r sockAddr
+            Just r  -> sendMessageTo sock (udpPayloadLimit query) r sockAddr
             Nothing -> return 0
     handleQuery _ _ = return 0
     sourcePort (SockAddrInet port _)      = Just (fromIntegral port :: Int)
@@ -127,21 +142,85 @@ recvMessageFrom sock = do
   (pkt,sockAddr) <- recvFrom sock 4096
   return (decodeMessage $ Packet pkt, B.length pkt, sockAddr)
 
--- | Send a DNS message to a 'SockAddr' with a UDP socket. If the encoded
--- message is larger than 512 bytes and is a response, remove any resource
--- records it contains and change its 'RCode' to 'ServerFailure'. If it's
--- a query, drop it silently.
-sendMessageTo :: Socket -> Message -> SockAddr -> IO Int
-sendMessageTo sock msg sockAddr
-  |              B.length datagram      <= 512 = sendBS datagram
-  | msgQR msg && B.length truncatedResp <= 512 = sendBS truncatedResp
-  | otherwise                                  = return 0
+-- | Send a DNS message of at most @limit@ bytes to a 'SockAddr' with a UDP
+-- socket (see 'encodeResponse'). Return the number of bytes sent.
+sendMessageTo :: Socket -> Int -> Message -> SockAddr -> IO Int
+sendMessageTo sock limit msg sockAddr =
+  case encodeResponse limit msg of
+    Just bs -> sendTo sock bs sockAddr >> return (B.length bs)
+    Nothing -> return 0
+
+-- | The largest UDP response we send to a query: 512 bytes, or the payload
+-- size the client advertises with EDNS(0) up to our own ('ednsUDPSize')
+-- (RFC 6891, section 6.2.5).
+udpPayloadLimit :: Message -> Int
+udpPayloadLimit query = case findEDNS query of
+  Just e  -> fromIntegral . max 512 . min ednsUDPSize $ ednsPayloadSize e
+  Nothing -> 512
+
+-- | Encode a message in at most @limit@ bytes. A response that doesn't fit is
+-- truncated ('truncateMessage'), as RFC 1035 and RFC 7766 prescribe, so that
+-- the client retries over TCP. A query that doesn't fit is dropped.
+encodeResponse :: Int -> Message -> Maybe ByteString
+encodeResponse limit msg
+  | B.length full <= limit                 = Just full
+  | msgQR msg, B.length truncated <= limit = Just truncated
+  | otherwise                              = Nothing
   where
-    datagram      = toBS msg
-    truncatedResp = toBS msg { msgRCode = ServerFailure, msgAnswers = []
-                             , msgAuthority = [], msgAdditional = [] }
-    sendBS bs = sendTo sock bs sockAddr >> return (B.length bs)
-    toBS = unPacket . encodeMessage
+    full      = unPacket $ encodeMessage msg
+    truncated = unPacket . encodeMessage $ truncateMessage msg
+
+-- | Set the TC bit and remove all records except the OPT pseudo-record.
+truncateMessage :: Message -> Message
+truncateMessage msg =
+  msg { msgTC = True, msgAnswers = [], msgAuthority = []
+      , msgAdditional = [ rr | rr@UnsupportedResourceRecord{rrType = TOPT}
+                                 <- msgAdditional msg ] }
+
+-- | Serve DNS queries arriving over an accepted TCP connection (RFC 7766):
+-- each message is preceded by its length as a 16-bit big-endian integer, and
+-- a client may send any number of queries one after another. Answer them in
+-- order until the client closes the connection, sends something that isn't a
+-- DNS message, or is idle for @idle@ microseconds. The statistics action and
+-- handler are as for 'runServer'. Doesn't close the socket.
+serveTCPConnection
+  :: Socket -> SockAddr -> Int -> (Int -> Int -> IO ())
+  -> (SockAddr -> Message -> IO (Maybe Message)) -> IO ()
+serveTCPConnection sock addr idle stats handler = loop
+  where
+    loop = do
+      mbLen <- recvTimeout 2
+      whenJust mbLen $ \lenBytes -> do
+        let len = fromIntegral (B.index lenBytes 0) `shiftL` 8 .|.
+                  fromIntegral (B.index lenBytes 1)
+        mbPkt <- if len == 0 then return Nothing else recvTimeout len
+        whenJust mbPkt $ \pkt ->
+          whenJust (decodeMessage (Packet pkt)) $ \query -> do
+            response <- handler addr query
+            out <- case response >>= encodeResponse 65535 of
+              Just bs -> do
+                NSB.sendAll sock (tcpFrame bs)
+                return (2 + B.length bs)
+              Nothing -> return 0
+            stats (2 + len) out
+            loop
+    recvTimeout n = fmap join . timeout idle $ recvExactly sock n
+
+-- | Read exactly @n@ bytes from a stream socket. Return 'Nothing' if the
+-- connection is closed first.
+recvExactly :: Socket -> Int -> IO (Maybe ByteString)
+recvExactly sock n = go n []
+  where
+    go 0 acc = return . Just $! B.concat (reverse acc)
+    go k acc = do
+      bs <- NSB.recv sock k
+      if B.null bs then return Nothing else go (k - B.length bs) (bs : acc)
+
+-- | Prefix a message with its length, for DNS over TCP. The message must be
+-- at most 65535 bytes long.
+tcpFrame :: ByteString -> ByteString
+tcpFrame bs = B.pack [fromIntegral (l `shiftR` 8), fromIntegral l] `B.append` bs
+  where l = B.length bs
 
 -- | A wrapper for using 'recvBufFrom' with 'ByteString's.
 recvFrom :: Socket -> Int -> IO (ByteString, SockAddr)

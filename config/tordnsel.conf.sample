@@ -38,9 +38,9 @@
 ## unspecified. You will probably need to uncomment and change some of
 ## these.
 
-## Bind the name server to this IP address and UDP port. If you want to
-## bind to all interfaces, you might set the address to "0.0.0.0"; IPv6
-## addresses go in brackets, e.g. "[::]:53". This port is bound before
+## Bind the name server to this IP address and port (UDP and TCP). If you
+## want to bind to all interfaces, you might set the address to "0.0.0.0";
+## IPv6 addresses go in brackets, e.g. "[::]:53". The ports are bound before
 ## dropping privileges. Leave it commented to use the default.
 #DNSListenAddress 127.0.0.1:53
 

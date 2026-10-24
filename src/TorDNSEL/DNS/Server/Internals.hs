@@ -32,6 +32,8 @@
 -- valid query exist as empty non-terminals (NOERROR with no data), which keeps
 -- resolvers using QNAME minimisation (RFC 9156) working.
 --
+-- Queries are answered over UDP and TCP (RFC 7766).
+--
 -----------------------------------------------------------------------------
 
 -- #not-home
@@ -39,8 +41,9 @@ module TorDNSEL.DNS.Server.Internals where
 
 import Prelude hiding (log)
 import qualified Control.Exception as E
-import Control.Monad (when, guard)
+import Control.Monad (when, guard, forever)
 import Data.Bits ((.|.), shiftL)
+import Data.IORef (newIORef, atomicModifyIORef')
 import qualified Data.ByteString.Char8 as B
 import Data.ByteString (ByteString)
 import Data.Char (toLower, isDigit)
@@ -49,7 +52,8 @@ import qualified Data.Map as M
 import Data.Maybe (isNothing, maybeToList)
 import Data.Time.Clock.POSIX (POSIXTime, getPOSIXTime)
 import Data.Word (Word32)
-import Network.Socket (Socket, HostAddress, SockAddr(..))
+import Network.Socket (Socket, HostAddress, SockAddr(..), accept)
+import Control.Concurrent (threadDelay)
 
 import TorDNSEL.Control.Concurrent.Link
 import TorDNSEL.Control.Concurrent.Util
@@ -64,6 +68,7 @@ import TorDNSEL.Util
 data DNSConfig
   = DNSConfig
   { dnsSocket   :: !Socket         -- ^ The server's bound UDP socket.
+  , dnsTCPSocket :: !Socket        -- ^ The server's listening TCP socket.
   , dnsAuthZone :: !DomainName     -- ^ The zone we're authoritative for.
   , dnsMyName   :: !DomainName     -- ^ The domain name where we're located.
   , dnsSOA      :: !ResourceRecord -- ^ Our SOA record.
@@ -79,8 +84,8 @@ data DNSConfig
 
 instance Eq DNSConfig where
   x == y = all (\(===) -> x === y)
-    [ eq dnsSocket, eq dnsAuthZone, eq dnsMyName, eq dnsSOA, eq dnsNS, eq dnsA
-    , eq dnsLists ]
+    [ eq dnsSocket, eq dnsTCPSocket, eq dnsAuthZone, eq dnsMyName, eq dnsSOA
+    , eq dnsNS, eq dnsA, eq dnsLists ]
     where
       eq :: Eq b => (a -> b) -> a -> a -> Bool
       eq = on (==)
@@ -116,8 +121,12 @@ startDNSServer initConf = do
   where
     loop :: (forall a. IO a -> IO a) -> DNSConfig -> IO ()
     loop restore conf = do
+      -- The TCP server runs in its own thread for the current config, and is
+      -- restarted whenever we're reconfigured.
+      tcp <- forkIO . restore $ runTCPServer restore conf
       r <- E.tryJust fromExitSignal . restore $
              runServer (dnsSocket conf) (dnsByteStats conf) (dnsHandler conf)
+      killThread tcp
       case r of
         Left (_,Reconfigure reconf signal) -> do
           let newConf = reconf conf
@@ -125,6 +134,8 @@ startDNSServer initConf = do
             log Notice "Reconfiguring DNS server."
           when (dnsSocket conf /= dnsSocket newConf) $
             closeSocket $ dnsSocket conf
+          when (dnsTCPSocket conf /= dnsTCPSocket newConf) $
+            closeSocket $ dnsTCPSocket conf
           signal
           loop restore newConf
         Left (_,Terminate reason) -> do
@@ -146,6 +157,47 @@ reconfigureDNSServer reconf (DNSServer tid) =
 terminateDNSServer :: Maybe Int -> DNSServer -> IO ()
 terminateDNSServer mbWait (DNSServer tid) =
   terminateThread mbWait tid (throwTo tid $ exitReason $ Terminate NormalExit)
+
+-- | Accept connections on the TCP socket and serve each in its own thread
+-- ('serveTCPConnection'), at most 'maxTCPConnections' at a time. Connections
+-- beyond that are closed right away; clients will retry. Connections that are
+-- idle for 'tcpIdleTimeout' are closed (RFC 7766, section 6.2.3).
+runTCPServer :: (forall a. IO a -> IO a) -> DNSConfig -> IO ()
+runTCPServer restore conf = do
+  active <- newIORef (0 :: Int)
+  let reserve = atomicModifyIORef' active $ \n ->
+        if n >= maxTCPConnections then (n, False) else (n + 1, True)
+      release = atomicModifyIORef' active $ \n -> (n - 1, ())
+  forever $ do
+    r <- E.try . accept $ dnsTCPSocket conf
+    case r of
+      -- E.g. too many open files. Don't spin.
+      Left (e :: E.IOException) -> do
+        log Warn "Accepting a DNS connection over TCP failed: " e
+        threadDelay 1000000
+      Right (sock, addr) -> do
+        ok <- reserve
+        if not ok
+          then closeSocket sock
+          else do
+            let done = closeSocket sock >> release
+                serve = serveTCPConnection sock addr tcpIdleTimeout
+                          (dnsByteStats conf) (dnsHandler conf)
+            _ <- forkIO (restore (ignoreErrors serve) `E.finally` done)
+                   `E.onException` done
+            return ()
+  where
+    -- A connection that fails (e.g. the client resets it) concerns no-one
+    -- else.
+    ignoreErrors io = io `E.catch` \(_ :: E.IOException) -> return ()
+
+-- | How many DNS over TCP connections we serve at the same time.
+maxTCPConnections :: Int
+maxTCPConnections = 128
+
+-- | How long, in microseconds, a DNS over TCP connection may be idle.
+tcpIdleTimeout :: Int
+tcpIdleTimeout = 10 * 1000000
 
 -- | A stateful wrapper for 'dnsResponse'.
 dnsHandler :: DNSConfig -> SockAddr -> Message -> IO (Maybe Message)

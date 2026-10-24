@@ -170,7 +170,8 @@ data State = State
   , dnsServer           :: DNSServer -- ^ The DNS server thread.
   , exitTestListeners   :: Map SockAddr (Maybe Socket)
                             -- ^ Listening exit test sockets.
-  , dnsListener         :: Socket -- ^ The listening DNS socket.
+  , dnsListener         :: Socket -- ^ The DNS socket (UDP).
+  , dnsTCPListener      :: Socket -- ^ The listening DNS socket (TCP).
   , webServer           :: Maybe WebServer
                             -- ^ The web interface thread, if enabled.
   , httpListener        :: Maybe Socket
@@ -276,8 +277,8 @@ main = do
     (exitPrint Can'tCreate . cat "Opening PID file failed: ")
 
   log Notice "Opening DNS listener on " (cfDNSListenAddress conf) '.'
-  dnsSock <- catchIO
-    (bindUDPSocket $ cfDNSListenAddress conf)
+  dnsSocks <- catchIO
+    (bindDNSSockets $ cfDNSListenAddress conf)
     (\e -> exitPrint (bindErrorCode e) $
              cat "Opening DNS listener on " (cfDNSListenAddress conf)
                  " failed: " e)
@@ -319,7 +320,7 @@ main = do
     dropPrivileges ids
 
     let static = StaticState availFileDesc random statsSock reconfigSock
-    runMainThread static testListeners dnsSock httpSock conf
+    runMainThread static testListeners dnsSocks httpSock conf
 
 -- | Given the command line arguments, check whether config options provided on
 -- the command line and in an optional config file are well-formed. If they are,
@@ -343,10 +344,10 @@ verifyConfig args =
 
 -- | Install signal handlers, start children of the main thread, and enter the
 -- main message-processing loop. Exit if we fail to start any threads.
-runMainThread :: StaticState -> Map SockAddr (Maybe Socket) -> Socket
+runMainThread :: StaticState -> Map SockAddr (Maybe Socket) -> (Socket, Socket)
               -> Maybe Socket -> Config -> IO ()
-runMainThread static initTestListeners initDNSListener initHTTPListener
-              initConf = do
+runMainThread static initTestListeners (initDNSListener, initDNSTCPListener)
+              initHTTPListener initConf = do
   mainChan <- newChan
   setTrapExit $ (writeChan mainChan .) . Exit
 
@@ -377,11 +378,12 @@ runMainThread static initTestListeners initDNSListener initHTTPListener
     netState <- initializeNetworkStateManager static
                   (mkExitTestConfig static initTestListeners initConf) initConf
       `E.onException` cleanup'
-    dns <- startDNSServer (mkDNSServerConfig initDNSListener initConf)
+    dns <- startDNSServer
+             (mkDNSServerConfig initDNSListener initDNSTCPListener initConf)
     web <- (startWebServer . mkWebConfig initConf) `liftMb` initHTTPListener
     return $ State (Just initLogger) (Just initReconfig) (Just stats) netState
-                   dns initTestListeners initDNSListener web initHTTPListener
-                   S.empty
+                   dns initTestListeners initDNSListener initDNSTCPListener
+                   web initHTTPListener S.empty
 
   log Notice "Successfully initialized all main subsystems. If no warnings "
              "appear above, it looks like everything is working."
@@ -511,7 +513,8 @@ handleMessage mainChan static conf s (Exit tid reason)
   | tid == threadId (dnsServer s) = do
       log Warn "The DNS server thread exited unexpectedly: "
                (show reason) "; restarting."
-      newDNSServer <- startDNSServer $ mkDNSServerConfig (dnsListener s) conf
+      newDNSServer <- startDNSServer $
+        mkDNSServerConfig (dnsListener s) (dnsTCPListener s) conf
       return (conf, s { dnsServer = newDNSServer })
   | Just web <- webServer s, tid == threadId web
   , Just sock <- httpListener s = do
@@ -527,11 +530,21 @@ handleMessage mainChan static conf s (Exit tid reason)
       return (conf, s)
   where deadThreadIs thr = ((tid ==) . threadId) `fmap` thr s == Just True
 
--- | Return the DNS server config given a listening DNS socket and the 'Config'.
-mkDNSServerConfig :: Socket -> Config -> DNSConfig
-mkDNSServerConfig dnsSock conf =
+-- | Open the DNS sockets for an address: a UDP socket and a listening TCP
+-- socket (RFC 7766 requires authoritative servers to answer over TCP).
+bindDNSSockets :: SockAddr -> IO (Socket, Socket)
+bindDNSSockets addr =
+  E.bracketOnError (bindUDPSocket addr) closeSocket $ \udp -> do
+    tcp <- bindListeningTCPSocket addr
+    return (udp, tcp)
+
+-- | Return the DNS server config given the DNS sockets (UDP and listening
+-- TCP) and the 'Config'.
+mkDNSServerConfig :: Socket -> Socket -> Config -> DNSConfig
+mkDNSServerConfig dnsSock dnsTCPSock conf =
   DNSConfig
     { dnsSocket = dnsSock
+    , dnsTCPSocket = dnsTCPSock
     , dnsAuthZone = DomainName $ reverse authLabels
     , dnsMyName = cfDomainName conf
     , dnsSOA = SOA (cfZoneOfAuthority conf) ttl (cfDomainName conf)
@@ -659,7 +672,7 @@ reconfigureDNSListenerAndServer
 reconfigureDNSListenerAndServer static oldConf newConf errorRespond = do
   when (cfDNSListenAddress oldConf /= cfDNSListenAddress newConf) $ do
     log Notice "Opening DNS listener on " (cfDNSListenAddress newConf) '.'
-    r <- liftIO . E.try $ bindUDPSocket $ cfDNSListenAddress newConf
+    r <- liftIO . E.try $ bindDNSSockets $ cfDNSListenAddress newConf
     case r of
       Left (e :: E.IOException) -> do
         errorRespond $
@@ -667,13 +680,15 @@ reconfigureDNSListenerAndServer static oldConf newConf errorRespond = do
               " failed: " e "; exiting gracefully."
         s <- get
         liftIO $ terminateProcess (bindErrorCode e) static s Nothing
-      Right sock -> do
+      Right (sock, tcpSock) -> do
         log Notice "Closing DNS listener on " (cfDNSListenAddress oldConf) '.'
-        modify' $ \s -> s { dnsListener = sock }
+        modify' $ \s -> s { dnsListener = sock, dnsTCPListener = tcpSock }
   s <- get
   r <- liftIO . E.tryJust syncExceptions $
           reconfigureDNSServer
-            (const $ mkDNSServerConfig (dnsListener s) newConf) (dnsServer s)
+            (const $ mkDNSServerConfig (dnsListener s) (dnsTCPListener s)
+                                       newConf)
+            (dnsServer s)
   case r of
     Left e -> do
       errorRespond $ cat "Reconfiguring DNS Server failed: " e
@@ -749,6 +764,7 @@ terminateProcess status static s mbWait = do
       ignoreIOExn $ closeSocket sock
   log Info "Closing DNS listener."
   ignoreIOExn . closeSocket $ dnsListener s
+  ignoreIOExn . closeSocket $ dnsTCPListener s
   whenJust (httpListener s) $ \sock -> do
     log Info "Closing HTTP listener."
     ignoreIOExn $ closeSocket sock

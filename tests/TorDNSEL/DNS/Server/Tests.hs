@@ -16,13 +16,19 @@
 -- #hide
 module TorDNSEL.DNS.Server.Tests (tests) where
 
+import Control.Concurrent (forkIO, threadDelay)
+import qualified Control.Exception as E
 import qualified Data.ByteString.Char8 as B
 import qualified Data.Map as M
 import Network.Socket
-  (Socket, socket, Family(AF_INET), SocketType(Datagram), SockAddr(..))
+  ( Socket, socket, Family(AF_INET), SocketType(Datagram, Stream), SockAddr(..)
+  , bind, listen, accept, connect, getSocketName, close )
+import qualified Network.Socket.ByteString as NSB
+import System.Timeout (timeout)
 import Test.HUnit (Test(..), (@=?), (@?), assertFailure)
 
 import TorDNSEL.DNS
+import TorDNSEL.DNS.Internals (Packet(..), encodeMessage, decodeMessage, tcpFrame)
 import TorDNSEL.DNS.Server.Internals
 import TorDNSEL.ExitList
 import TorDNSEL.Fixtures
@@ -36,6 +42,8 @@ tests = TestList
       ]
   , TestLabel "query parsing" parsing
   , TestLabel "responses" responses
+  , TestLabel "truncation" truncation
+  , TestLabel "TCP" tcp
   ]
   where
     query = toLabels ["ip-port","1","2","3","4","80","10","0","0","1"]
@@ -166,6 +174,93 @@ responses = TestCase $ do
     show' Other    = "Other"
     rrNameOf m = qName (msgQuestion m)
 
+-- | Responses too big for UDP are truncated, so that clients retry over TCP.
+truncation :: Test
+truncation = TestCase $ do
+  let name = toName ["torhosts","example","com"]
+      big = (query name TTXT)
+              { msgQR = True
+              , msgAnswers = replicate 4 (TXT name ttl [B.replicate 200 'x']) }
+      withEDNS size m = m { msgAdditional = [UnsupportedResourceRecord
+                              (DomainName []) 0 TOPT (UnsupportedClass size)
+                              B.empty] }
+  512  @=? udpPayloadLimit (query name TA)
+  1232 @=? udpPayloadLimit (withEDNS 4096 $ query name TA)
+  512  @=? udpPayloadLimit (withEDNS 100 $ query name TA)
+  case decodeMessage . Packet =<< encodeResponse 512 big of
+    Just m  -> (True, [], [], []) @=?
+                 (msgTC m, msgAnswers m, msgAuthority m, msgAdditional m)
+    Nothing -> assertFailure "no truncated response"
+  -- the OPT record survives truncation
+  case decodeMessage . Packet =<< encodeResponse 512 (withEDNS 1232 big) of
+    Just m  -> (True, 1) @=? (msgTC m, length (msgAdditional m))
+    Nothing -> assertFailure "no truncated response with EDNS"
+  -- it fits in 1232 bytes, and certainly over TCP
+  fmap (msgTC) (decodeMessage . Packet =<< encodeResponse 1232 big)
+    @=? Just False
+  -- queries are never truncated
+  Nothing @=? encodeResponse 20 (query name TA)
+
+-- | DNS over TCP on a real connection: pipelined queries are answered in
+-- order, and idle or broken connections are closed.
+tcp :: Test
+tcp = TestCase $ do
+  listener <- socket AF_INET Stream 0
+  bind listener (SockAddrInet 0 (htonl $ ip "127.0.0.1"))
+  listen listener 5
+  addr <- getSocketName listener
+  let name = toName ["torhosts","example","com"]
+      handler _ q = return . Just $ q { msgQR = True, msgAnswers =
+                      [A name ttl (fromIntegral (msgID q))] }
+      -- accept the next connection, in the background
+      serve = do
+        _ <- forkIO $ do
+          (s, a) <- accept listener
+          serveTCPConnection s a 300000 (\_ _ -> return ()) handler
+            `E.finally` close s
+        return ()
+      connectTo = do
+        c <- socket AF_INET Stream 0
+        connect c addr
+        return c
+      frame i = tcpFrame . unPacket . encodeMessage $
+                  (query name TA) { msgID = i }
+      readResponse c = do
+        mbLen <- recvN c 2
+        case mbLen of
+          Just l | [h, lo] <- B.unpack l -> do
+            body <- recvN c (fromEnum h * 256 + fromEnum lo)
+            return $ decodeMessage . Packet =<< body
+          _ -> return Nothing
+
+  -- two queries in one segment, one split over two
+  serve
+  c <- connectTo
+  NSB.sendAll c (frame 1 `B.append` frame 2)
+  let f3 = frame 3
+  NSB.sendAll c (B.take 5 f3) >> threadDelay 50000 >> NSB.sendAll c (B.drop 5 f3)
+  rs <- mapM (const $ readResponse c) [1 :: Int, 2, 3]
+  map (fmap msgID) rs @=? map Just [1, 2, 3]
+  map (fmap (map aAddr . msgAnswers)) rs @=? map (Just . (:[])) [1, 2, 3]
+  -- then it's closed after being idle
+  closed <- timeout 2000000 (NSB.recv c 1)
+  Just B.empty @=? closed
+  close c
+
+  -- something that isn't a DNS message ends the connection
+  serve
+  c' <- connectTo
+  NSB.sendAll c' (B.pack "\0\3abc")
+  closed' <- timeout 2000000 (NSB.recv c' 1)
+  Just B.empty @=? closed'
+  close c' >> close listener
+  where
+    recvN c n = go n []
+      where go 0 acc = return . Just . B.concat $ reverse acc
+            go k acc = do
+              bs <- NSB.recv c k
+              if B.null bs then return Nothing else go (k - B.length bs) (bs:acc)
+
 -- | A DNS query.
 query :: DomainName -> Type -> Message
 query name qt = Message 0x1234 False StandardQuery False False True False
@@ -174,6 +269,7 @@ query name qt = Message 0x1234 False StandardQuery False False True False
 dnsConf :: Socket -> DNSConfig
 dnsConf sock = DNSConfig
   { dnsSocket = sock
+  , dnsTCPSocket = sock
   , dnsAuthZone = authZone
   , dnsMyName = toName ["ns","example","com"]
   , dnsSOA = SOA zone ttl (toName ["ns","example","com"])
