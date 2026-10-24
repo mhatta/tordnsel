@@ -678,9 +678,9 @@ instance Binary Type where
 -- respectively.
 data Class
   = IN                       -- ^ The Internet. We only support this class.
+  | AnyClass                 -- ^ QCLASS * (255), a request for any class.
   | UnsupportedClass !Word16 -- ^ Any other class.
   deriving (Eq, Show)
-  -- XXX support *
 
 instance NFData Class where
   rnf = rwhnf
@@ -689,10 +689,12 @@ instance Binary Class where
   get = do
     c <- get
     case c of
-      1 -> return IN
-      _ -> return $ UnsupportedClass c
+      1   -> return IN
+      255 -> return AnyClass
+      _   -> return $ UnsupportedClass c
 
   put IN                   = putWord16be 1
+  put AnyClass             = putWord16be 255
   put (UnsupportedClass c) = put c
 
 --------------------------------------------------------------------------------
@@ -716,6 +718,7 @@ findEDNS msg = case [rr | rr@UnsupportedResourceRecord{rrType = TOPT}
   _ -> Nothing
   where
     classValue IN                   = 1
+    classValue AnyClass             = 255
     classValue (UnsupportedClass c) = c
 
 -- | An OPT pseudo-record advertising our UDP payload size, carrying the given

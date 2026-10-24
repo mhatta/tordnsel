@@ -35,6 +35,8 @@ tests = TestList . map TestCase $
   , aResponse @=? encodeMessage r
   , Just soaResponse @=? fmap encodeMessage (decodeMessage soaResponse)
   , Just nsResponse @=? fmap encodeMessage (decodeMessage nsResponse)
+  , Just (Question name TA AnyClass) @=?
+      fmap msgQuestion (decodeMessage anyClassQuery)
   , compNames' @=? compNames
   , decompNames' @=? decompNames ]
 
@@ -125,3 +127,7 @@ cyclicPtrs' = toPacket $
   \\xc0\x0c"
 
 toPacket = Packet . B.pack . map B.c2w
+
+-- | 'query' with QCLASS * (255) instead of IN.
+anyClassQuery :: Packet
+anyClassQuery = Packet $ B.init (unPacket query) `B.snoc` 255

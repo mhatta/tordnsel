@@ -178,7 +178,8 @@ dnsResponse c src msg now ns = withEDNS $ case () of
     | isNothing mbQLabels
     -> (Other, r { msgAA = False, msgRCode = Refused
                  , msgAnswers = [], msgAuthority = [dnsSOA c] })
-    | qc /= IN -> (Other, nxDomain soa)
+    -- Our data is all in class IN; QCLASS * asks for that too.
+    | qc /= IN, qc /= AnyClass -> (Other, nxDomain soa)
     -- a request matching our authoritative zone
     | Just [] <- mbQLabels -> case qt of
         TA | Just a <- dnsA c

@@ -145,6 +145,19 @@ responses = TestCase $ do
   let (_,r18) = dnsResponse conf client (query (toName ["example","org"]) TA)
                             now networkState
   Refused @=? msgRCode r18
+
+  -- QCLASS * is answered like IN; other classes have no data
+  let withClass qc m = m { msgQuestion = (msgQuestion m) { qClass = qc } }
+      name19 = toName ["11","0","0","10","80","4","3","2","1","ip-port"
+                      ,"torhosts","example","com"]
+      (t19,r19) = dnsResponse conf client (withClass AnyClass (query name19 TA))
+                              now networkState
+      (_,r20) = dnsResponse conf client
+                  (withClass (UnsupportedClass 3) (query name19 TA)) now
+                  networkState
+  typ "t19" Positive t19
+  [A name19 ttl 0x7f000002] @=? msgAnswers r19
+  (NXDomain, []) @=? (msgRCode r20, msgAnswers r20)
   where
     client = SockAddrInet 40000 (htonl $ ip "192.0.2.1")
     typ label a b = (label, show' a) @=? (label, show' b)
