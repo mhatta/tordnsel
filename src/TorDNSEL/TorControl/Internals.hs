@@ -158,7 +158,7 @@ import qualified Data.Map as M
 import Data.Maybe
 import qualified Data.Sequence as S
 import Data.Sequence ((<|), ViewR((:>)), viewr)
-import Data.Time (UTCTime, TimeZone, localTimeToUTC, getCurrentTimeZone)
+import Data.Time (UTCTime, TimeZone, localTimeToUTC, getCurrentTimeZone, utc)
 import System.IO (Handle, hClose, hSetBuffering, BufferMode(..), hFlush)
 import System.IO.Error (isEOFError)
 
@@ -825,7 +825,7 @@ addressMapEvent :: (Either TorControlError AddressMap -> IO ()) -> EventHandler
 addressMapEvent handler = EventHandler (B.pack "ADDRMAP") handleAddrMap
   where
     handleAddrMap (Reply _ text _:_) = do
-      -- XXX Extended events will provide the UTCTime in 0.2.0.x.
+      -- Only needed for very old Tors, which don't send EXPIRES (in UTC).
       tz <- getCurrentTimeZone
       handler . either (Left . ParseError) Right .
         parseAddressMap tz . B.drop 8 $ text
@@ -1193,9 +1193,18 @@ data AddressMap = AddrMap Address -- old address
 
 -- | Parse an address mapping, using the specified time zone to convert an
 -- expiry time to UTC. 'throwError' in the monad if parsing fails.
+--
+-- The expiry is given in local time, and since Tor 0.2.0.x also in UTC as
+-- @EXPIRES=\"...\"@; we use the latter when it's there, so that the local
+-- time zone (which may differ between us and Tor) doesn't matter.
 parseAddressMap :: MonadError ShowS m => TimeZone -> ByteString -> m AddressMap
 parseAddressMap tz line
   | fst (breakWS rest) == (B.pack "NEVER") = return $! mapping Never
+  | (_, expires) <- B.breakSubstring (B.pack " EXPIRES=\"") rest
+  , not (B.null expires), _:time:_ <- B.split '"' expires
+  = prependError
+      ("Failed parsing address mapping: " ++)
+      ((mapping . Expiry . localTimeToUTC utc) `liftM` parseLocalTime time)
   | (B.pack "\"") `B.isPrefixOf` rest, _:time:_ <- B.split '"' rest
   = prependError
       ("Failed parsing address mapping: " ++)

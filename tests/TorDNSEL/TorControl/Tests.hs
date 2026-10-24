@@ -18,6 +18,7 @@ import qualified Data.Conduit.List as CL
 import Data.IORef (newIORef, readIORef, writeIORef)
 import qualified Data.Map as M
 import qualified Data.Set as S
+import Data.Time (hoursToTimeZone)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import Test.HUnit (Test(..), (@=?), (@?))
 
@@ -31,8 +32,8 @@ import TorDNSEL.TorControl.Internals
 import TorDNSEL.Util (encodeBase16)
 
 tests :: Test
-tests = TestList [ protocolInfo', safeCookie, authChallenge, replies
-                 , consensusEvent, consensus, mapping ]
+tests = TestList [ protocolInfo', safeCookie, authChallenge, addressMap
+                 , replies, consensusEvent, consensus, mapping ]
 
 -- | The PROTOCOLINFO reply of Tor 0.4.9.6 with cookie authentication.
 protocolInfo' :: Test
@@ -80,6 +81,20 @@ authChallenge = TestCase $ do
   where
     isLeft' :: Either ShowS a -> Bool
     isLeft' = either (const True) (const False)
+
+-- | ADDRMAP events: the UTC EXPIRES field wins over the local time.
+addressMap :: Test
+addressMap = TestCase $ do
+  let tz = hoursToTimeZone 9
+      parse = either (Left . ($ "")) (Right . expiry) . parseAddressMap tz
+      expiry (AddrMap _ _ e) = show e
+  Right "2026-10-24 12:00:00" @=?
+    parse "example.com 192.0.2.1 \"2026-10-24 21:00:00\" \
+          \EXPIRES=\"2026-10-24 12:00:00\" CACHED=\"NO\""
+  -- without EXPIRES (Tor before 0.2.0.x) the local time zone is used
+  Right "2026-10-24 12:00:00" @=?
+    parse "example.com 192.0.2.1 \"2026-10-24 21:00:00\""
+  Right "Never" @=? parse "example.com 192.0.2.1 NEVER"
 
 -- | Raw control port output, including an asynchronous NEWCONSENSUS event
 -- interleaved with command replies.
