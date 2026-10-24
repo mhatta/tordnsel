@@ -23,6 +23,7 @@ import qualified TorDNSEL.Directory.Tests as Directory
 import qualified TorDNSEL.DNS.Tests as DNS
 import qualified TorDNSEL.DNS.Server.Tests as DNS.Server
 import qualified TorDNSEL.ExitList.Tests as ExitList
+import qualified TorDNSEL.Properties as Properties
 import qualified TorDNSEL.TorControl.Tests as TorControl
 import qualified TorDNSEL.Web.Tests as Web
 
@@ -30,5 +31,5 @@ main :: IO ()
 main = do
   counts <- runTestTT . TestList $
     [ Config.tests, Directory.tests, DNS.tests, DNS.Server.tests
-    , ExitList.tests, TorControl.tests, Web.tests ]
+    , ExitList.tests, TorControl.tests, Web.tests, Properties.tests ]
   when (errors counts + failures counts > 0) exitFailure

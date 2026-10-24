@@ -120,8 +120,10 @@ test-suite runtests
                     TorDNSEL.DNS.Server.Tests
                     TorDNSEL.ExitList.Tests
                     TorDNSEL.Fixtures
+                    TorDNSEL.Properties
                     TorDNSEL.TorControl.Tests
                     TorDNSEL.Web.Tests
   build-depends:    tordnsel,
-                    HUnit >= 1.6 && < 1.7
+                    HUnit >= 1.6 && < 1.7,
+                    QuickCheck >= 2.14 && < 2.17
   ghc-options:      -threaded -Wno-missing-signatures

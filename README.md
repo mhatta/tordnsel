@@ -82,7 +82,8 @@ without Hackage access, using the Setup script:
 
 ```sh
 apt-get install ghc libghc-network-dev libghc-conduit-dev \
-  libghc-conduit-extra-dev libghc-cryptohash-sha256-dev libghc-hunit-dev
+  libghc-conduit-extra-dev libghc-cryptohash-sha256-dev libghc-hunit-dev \
+  libghc-quickcheck2-dev
 runhaskell Setup.hs configure --enable-tests
 runhaskell Setup.hs build
 runhaskell Setup.hs test

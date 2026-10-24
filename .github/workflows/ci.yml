@@ -53,7 +53,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ghc libghc-network-dev libghc-conduit-dev \
             libghc-conduit-extra-dev libghc-cryptohash-sha256-dev \
-            libghc-hunit-dev
+            libghc-hunit-dev libghc-quickcheck2-dev
       - name: Build and test
         # The runner image puts a GHC installed with ghcup (without our
         # dependencies) first on the PATH; use Ubuntu's instead.
