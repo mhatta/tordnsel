@@ -62,7 +62,7 @@ import Prelude hiding (log)
 import Control.Arrow ((&&&))
 import Control.Monad (liftM2, when)
 import Control.Monad.Fix (fix)
-import Control.Monad.State
+import Control.Monad.State.Strict
   (StateT, runStateT, execStateT, get, gets, put, MonadIO, liftIO)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Chan (newChan, readChan, writeChan)
@@ -203,7 +203,6 @@ startNetworkStateManager initConf = do
     signal
     flip fix (initConf, initState) $ \loop (!conf,!s) -> do
       msg <- readChan chan
-      -- XXX This should be the strict StateT rather than the lazy one.
       runStateT (handleMessage net conf msg) s >>= loop
 
   return $ NetworkStateManager (writeChan chan) tid

@@ -70,7 +70,7 @@ import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
 import qualified Control.Exception as E
 import Control.Monad (when, liftM, forM, forM_)
 import Control.Monad.Fix (fix)
-import Control.Monad.State (StateT, runStateT, liftIO, get, put)
+import Control.Monad.State.Strict (StateT, runStateT, liftIO, get, put)
 import Data.Bits ((.&.), (.|.))
 import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy.Char8 as L
