@@ -27,6 +27,11 @@ allows it to detect exits configured to send outbound connections through a
 different IP address from the one they advertise in the directory. When
 configured to run active tests, \fBtordnsel\fR tests through a particular exit
 each time it publishes a new descriptor.
+.PP
+Each test carries a random cookie, which is accepted once. An exit sees the
+cookie, so a malicious exit can still answer a test from an address of its
+choosing; to bound what it can make \fBtordnsel\fR list, at most 16 tested
+addresses are kept per exit, each for 24 hours.
 
 .SH DNS INTERFACE
 Assume \fBZoneOfAuthority\fR is "exitlist.example.com". Addresses in query

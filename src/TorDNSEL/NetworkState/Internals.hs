@@ -50,6 +50,9 @@ module TorDNSEL.NetworkState.Internals (
   -- * Pure network state updates
   , mergeExitAddrsWithNetState
   , newExitAddress
+  , acceptTestedAddress
+  , takeCookie
+  , maxTestedAddresses
   , newDescriptor
   , newRouterStatus
   , newConsensus
@@ -291,15 +294,24 @@ handleMessage _net conf (NewExitAddress tested cookie address) = do
     Nothing -> log Info "Ignoring exit test request from " (inet_htoa address)
                         " since exit tests are disabled."
     Just testState ->
-      case cookie `M.lookup` cookies testState of
-        Nothing -> log Info "Received unrecognized cookie from "
-                            (inet_htoa address) "; discarding."
-        Just (rid,published,port) -> do
+      case takeCookie cookie (cookies testState) of
+        (Nothing, _) -> log Info "Received unrecognized (or already used) \
+                                 \cookie from " (inet_htoa address)
+                                 "; discarding."
+        (Just (rid,published,port), cookies') -> do
+          modify' $ \s -> s { exitTestState = Just $! testState
+                                                 { cookies = cookies' } }
           mbRouter <- gets (M.lookup rid . nsRouters . networkState)
           case mbRouter of
             Nothing -> log Info "Received cookie for unrecognized router " rid
                                 "; discarding."
-            Just router -> do
+            Just router
+             | not (acceptTestedAddress router address) ->
+              log Info "Exit test through router " rid " port " port
+                       " accepted from " (inet_htoa address) ", but the router \
+                       \already has " maxTestedAddresses " tested exit \
+                       \addresses; ignoring this one."
+             | otherwise -> do
               log Info "Exit test through router " rid " port " port
                       " accepted from " (inet_htoa address) '.'
               (router',networkState') <- gets $ newExitAddress tested published
@@ -654,6 +666,28 @@ mergeExitAddrsWithNetState = flip $ L.foldl' mergeAddr where
                             (M.unionWith max (tstAddresses old) exits)
       initialRouter = Router Nothing (Just $! initialTestResults) False status
       initialTestResults = TestResults pub exits
+
+-- | Look up a cookie and forget it. A cookie is good for one connection: it
+-- travels in the clear through the exit, so the exit could otherwise send it
+-- again from other addresses (open proxies, shared NAT or VPN egress, ...) and
+-- have them all listed as its exit addresses.
+takeCookie :: Cookie -> Map Cookie a -> (Maybe a, Map Cookie a)
+takeCookie = M.updateLookupWithKey (\_ _ -> Nothing)
+
+-- | The most exit addresses we record for a router from exit tests (on top of
+-- the address in its descriptor) until older ones expire. A legitimate exit
+-- rarely exits from more than a few; the limit bounds what a malicious one can
+-- make us list.
+maxTestedAddresses :: Int
+maxTestedAddresses = 16
+
+-- | Should we record @addr@ as an exit address of this router? Yes if we
+-- already have it or have room for it.
+acceptTestedAddress :: Router -> HostAddress -> Bool
+acceptTestedAddress router addr = case rtrTestResults router of
+  Nothing -> True
+  Just test -> addr `M.member` tstAddresses test ||
+               M.size (tstAddresses test) < maxTestedAddresses
 
 -- | Update the network state with the results of an exit test. Return the
 -- updated router information.

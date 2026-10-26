@@ -40,14 +40,15 @@ import TorDNSEL.Directory.Internals
 import TorDNSEL.ExitTest.Request (Cookie(..))
 import TorDNSEL.Fixtures
 import TorDNSEL.NetworkState.Internals
-  (newConsensus, exitMappingName)
+  ( newConsensus, exitMappingName, takeCookie, acceptTestedAddress
+  , maxTestedAddresses )
 import TorDNSEL.NetworkState.Types
 import TorDNSEL.TorControl.Internals
 import TorDNSEL.Util (encodeBase16)
 
 tests :: Test
 tests = TestList [ protocolInfo', safeCookie, authChallenge, cookieFiles
-                 , fakeTor, addressMap
+                 , fakeTor, exitTestCookies, addressMap
                  , replies, consensusEvent, consensus, mapping ]
 
 -- | The PROTOCOLINFO reply of Tor 0.4.9.6 with cookie authentication.
@@ -161,6 +162,23 @@ fakeTor = TestCase . withLinksDo $ do
                     return [l]
                 | otherwise -> (l :) `fmap` collect answerQuit hd
     isQuit l = B.map toUpperC (B.take 4 l) == B.pack "QUIT"
+
+-- | Exit test cookies work once, and a router gets at most
+-- 'maxTestedAddresses' tested exit addresses.
+exitTestCookies :: Test
+exitTestCookies = TestCase $ do
+  let c = Cookie (B.replicate 32 'c')
+      m = M.fromList [(c, 'x')]
+      (first', m') = takeCookie c m
+      (second', _) = takeCookie c m'
+  (Just 'x', Nothing) @=? (first', second')
+  let t = posixSecondsToUTCTime 0
+      router n = Router Nothing (Just $ TestResults t
+                   (M.fromList [(fromIntegral a, t) | a <- [1 .. n]])) True t
+  acceptTestedAddress (Router Nothing Nothing True t) 7 @? "first address refused"
+  acceptTestedAddress (router (maxTestedAddresses - 1)) 1000 @? "room refused"
+  not (acceptTestedAddress (router maxTestedAddresses) 1000) @? "over the cap"
+  acceptTestedAddress (router maxTestedAddresses) 1 @? "known address refused"
 
 -- | Parsing Tor's reply to AUTHCHALLENGE.
 authChallenge :: Test
