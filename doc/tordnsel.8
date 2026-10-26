@@ -155,6 +155,11 @@ specified, this should be an absolute path accessible inside the chroot.
 \fBRuntimeDirectory \fR\fIDIRECTORY\fP
 Place the statistics and reconfigure sockets in \fIDIRECTORY\fR before chrooting
 and dropping privileges.
+.PP
+Both directories are created if missing and given to the user \fBtordnsel\fR
+runs as (the state directory) or starts as (the runtime directory). Neither
+may be writable by other users: \fBtordnsel\fR refuses to start otherwise.
+Files and sockets are created with a umask of 077.
 
 .SH OPTIONAL OPTIONS
 The following options either have sensible default values or can be left
@@ -207,8 +212,9 @@ to irreversibly change the root directory of
 the process to \fIDIRECTORY\fP. (Default: none)
 .TP
 \fBPIDFile \fR\fIFILE\fP
-On startup, write our PID to \fIFILE\fP. \fIFILE\fP won't be removed on exit.
-(Default: none)
+On startup, write our PID to \fIFILE\fP, which is created afresh (mode 0644),
+replacing any file or symbolic link of that name. \fIFILE\fP won't be removed
+on exit. (Default: none)
 .TP
 \fBExitList \fR\fINAME\fR \fIPATTERN\fR [\fIPATTERN\fR...]\fP
 Define the list \fINAME\fR for "list" queries. Each \fIPATTERN\fR is

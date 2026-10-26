@@ -29,11 +29,14 @@ import System.Directory (getTemporaryDirectory, removeFile)
 import System.IO
   (IOMode(ReadWriteMode), hClose, hFlush, openBinaryTempFile, hSetBuffering,
    BufferMode(LineBuffering))
-import System.Posix.Files (createNamedPipe)
+import System.Posix.Files
+  ( createNamedPipe, createSymbolicLink, getSymbolicLinkStatus, isRegularFile
+  , fileMode )
 import System.Timeout (timeout)
 import Test.HUnit (Test(..), (@=?), (@?), assertFailure)
 
-import TorDNSEL.Files (readSmallRegularFile)
+import TorDNSEL.Files
+  (readSmallRegularFile, createFileExclusively, isGroupOrWorldWritable)
 
 import TorDNSEL.Directory.Internals
 import TorDNSEL.ExitTest.Request (Cookie(..))
@@ -99,6 +102,19 @@ cookieFiles = TestCase $ do
   case r3 of
     Nothing -> assertFailure "reading a FIFO blocked"
     Just r  -> isLeft' r @? "FIFO accepted"
+  -- createFileExclusively replaces a symbolic link rather than writing
+  -- through it, and sets the mode despite the umask
+  (victim, hv) <- openBinaryTempFile tmp "victim"
+  B.hPut hv (B.pack "victim") >> hClose hv
+  let pidFile = victim ++ ".pid"
+  createSymbolicLink victim pidFile
+  hp <- createFileExclusively pidFile 0o644
+  B.hPut hp (B.pack "1234\n") >> hClose hp
+  B.readFile victim >>= (B.pack "victim" @=?)
+  st <- getSymbolicLinkStatus pidFile
+  (True, 0o644) @=? (isRegularFile st, fileMode st `mod` 0o1000)
+  mapM_ removeFile [victim, pidFile]
+  (True, False) @=? (isGroupOrWorldWritable 0o1777, isGroupOrWorldWritable 0o755)
   where
     isLeft' :: Either E.IOException a -> Bool
     isLeft' = either (const True) (const False)

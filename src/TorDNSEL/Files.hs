@@ -26,7 +26,8 @@ import qualified Data.ByteString as B
 import System.IO (Handle, hClose)
 import System.IO.Error (mkIOError, userErrorType, isDoesNotExistError)
 import System.Posix.Files
-  ( getFdStatus, isRegularFile, removeLink, groupWriteMode, otherWriteMode )
+  ( getFdStatus, isRegularFile, removeLink, groupWriteMode, otherWriteMode
+  , setFdMode )
 import System.Posix.IO
   ( openFd, OpenMode(..), OpenFileFlags(..), defaultFileFlags, fdToHandle
   , closeFd )
@@ -56,7 +57,8 @@ createFileExclusively path mode = do
   removeLink path `E.catch` \e ->
     if isDoesNotExistError e then return () else E.throwIO e
   fd <- openCreateExclusive path mode
-  fdToHandle fd `E.onException` closeFd fd
+  -- The mode given to open(2) is subject to the umask; set it as asked.
+  (setFdMode fd mode >> fdToHandle fd) `E.onException` closeFd fd
 
 -- | Can users other than the owner write to this file or directory?
 isGroupOrWorldWritable :: FileMode -> Bool

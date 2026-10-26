@@ -84,7 +84,7 @@ import Data.Set (Set)
 import System.Environment (getArgs)
 import System.IO
   ( openFile, hPutStrLn, hClose, Handle, stdout, stderr
-  , IOMode(WriteMode, AppendMode) )
+  , IOMode(AppendMode) )
 import System.IO.Error (isPermissionError)
 import Network.Socket
   (Socket, SockAddr(SockAddrInet), shutdown, ShutdownCmd(ShutdownSend))
@@ -103,7 +103,8 @@ import System.Posix.Signals
 
 import System.Posix.Error (throwErrnoPathIfMinus1_)
 import System.Posix.Files
-  (getFileStatus, fileOwner, fileMode, setFileMode, setOwnerAndGroup)
+  ( getFileStatus, fileOwner, fileMode, setFileMode, setOwnerAndGroup
+  , setFileCreationMask )
 import System.Posix.Resource
   ( ResourceLimits(..), ResourceLimit(..), Resource(ResourceOpenFiles)
   , getResourceLimit, setResourceLimit )
@@ -118,6 +119,7 @@ import TorDNSEL.Control.Concurrent.Link
 import TorDNSEL.Control.Concurrent.Util
 import TorDNSEL.DNS
 import TorDNSEL.DNS.Server
+import TorDNSEL.Files (createFileExclusively, isGroupOrWorldWritable)
 import TorDNSEL.Log
 import TorDNSEL.NetworkState
 import TorDNSEL.Random
@@ -230,6 +232,8 @@ main = do
         | otherwise                        -> ProtocolError
     _ -> return ()
 
+  -- Files and sockets we create are ours alone unless we say otherwise.
+  _ <- setFileCreationMask 0o077
   log Notice "Starting TorDNSEL " VERSION "."
   conf <- do
     conf <- exitLeft Usage $ parseConfigArgs args
@@ -272,8 +276,10 @@ main = do
     (bindReconfigSocket (cfRuntimeDirectory conf) (fst ids))
     (exitPrint Can'tCreate . cat "Opening reconfigure listener failed: ")
 
+  -- Created afresh, never through a symbolic link: we're probably root here,
+  -- and the PID file's directory may be writable by the user we run as.
   pidHandle <- catchIO
-    (flip openFile WriteMode `liftMb` cfPIDFile conf)
+    ((`createFileExclusively` 0o644) `liftMb` cfPIDFile conf)
     (exitPrint Can'tCreate . cat "Opening PID file failed: ")
 
   log Notice "Opening DNS listener on " (cfDNSListenAddress conf) '.'
@@ -862,7 +868,18 @@ setMaxOpenFiles lowerLimit cap0 = do
 
   catchIO
     (setResourceLimit ResourceOpenFiles (newLimits most) >> return most) $ \e ->
-    do
+    if isPermissionError e && euid == 0
+      then
+        -- root without CAP_SYS_RESOURCE (in a container, say) can't raise
+        -- the hard limit; make do with it.
+        case hard of
+          Just h | h >= lowerLimit -> do
+            let most' = min cap h
+            setResourceLimit ResourceOpenFiles
+                             limits { softLimit = ResourceLimit most' }
+            return most'
+          _ -> E.throwIO e
+      else do
 #ifdef OPEN_MAX
       -- For macOS, where the kernel refuses limits above OPEN_MAX.
       let openMax = #{const OPEN_MAX} :: Integer
@@ -881,12 +898,18 @@ setMaxOpenFiles lowerLimit cap0 = do
     showLimit ResourceLimitUnknown  = "unknown"
 
 -- | Set up the state or runtime directory with proper ownership and
--- permissions.
+-- permissions. Refuse a directory that users other than its owner can write
+-- to: we create sockets and files in it as root and change their ownership
+-- and mode, which others could redirect with symbolic links; and such a
+-- directory (e.g. \/tmp, set by mistake) isn't ours to take over.
 checkDirectory :: Maybe UserID -> Maybe FilePath -> FilePath -> IO ()
 checkDirectory uid newRoot path = do
   createDirectoryIfMissing True fullPath
   desiredUID <- maybe getEffectiveUserID return uid
   st <- getFileStatus fullPath
+  when (isGroupOrWorldWritable (fileMode st)) $
+    ioError . userError $ cat (esc 256 $ B.pack fullPath)
+      " is writable by users other than its owner; refusing to use it."
   when (fileOwner st /= desiredUID) $
     setOwnerAndGroup fullPath desiredUID (-1)
   when (fileMode st .&. 0o700 /= 0o700) $
