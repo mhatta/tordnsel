@@ -24,6 +24,7 @@ import System.Timeout (timeout)
 import Test.HUnit (Test(..), (@=?), (@?))
 
 
+import TorDNSEL.AddressPattern
 import TorDNSEL.ExitList
 import TorDNSEL.Fixtures
 import TorDNSEL.Util
@@ -40,7 +41,7 @@ limits = do
   bind listener (SockAddrInet 0 (htonl $ ip "127.0.0.1"))
   listen listener 32
   addr <- getSocketName listener
-  web <- startWebServer (WebConfig listener M.empty Nothing (return ()))
+  web <- startWebServer (WebConfig listener M.empty Nothing (return ()) [])
   let open1 = do
         c <- socket AF_INET Stream 0
         connect c addr
@@ -74,14 +75,26 @@ limits = do
 requests :: Test
 requests = TestList . map TestCase $
   [ Just (Request "GET" "/api/v1/ip-port"
-                  [("ip","10.0.0.11"),("port","80"),("dest","1.2.3.4")])
+                  [("ip","10.0.0.11"),("port","80"),("dest","1.2.3.4")]
+                  [("host","example.com")])
       @=? parseRequest "GET /api/v1/ip-port?ip=10.0.0.11&port=80&dest=1.2.3.4 \
                        \HTTP/1.1\r\nHost: example.com"
-  , Just (Request "HEAD" "/a b" [("x","1 2"),("y","")])
+  , Just (Request "HEAD" "/a b" [("x","1 2"),("y","")] [])
       @=? parseRequest "HEAD /a%20b?x=1+2&y= HTTP/1.0"
+  -- header names are lower-cased and values trimmed; lines without a colon
+  -- are ignored
+  , Just [("x-forwarded-for","192.0.2.7, 10.0.0.1"),("a","b:c")]
+      @=? fmap reqHeaders (parseRequest "GET / HTTP/1.1\r\n\
+            \X-Forwarded-For:  192.0.2.7, 10.0.0.1 \r\nbogus\r\nA: b:c")
   , Nothing @=? parseRequest "GET /a%2 HTTP/1.1"
   , Nothing @=? parseRequest "GET http://example.com/ HTTP/1.1"
   , Nothing @=? parseRequest "garbage"
+  -- address patterns, as for HTTPTrustedProxy
+  , Just [ Net4 (ip "127.0.0.1") 0xffffffff, Net4 (ip "10.1.0.0") 0xffff0000
+         , Addr6 (0, 0, 0, 1) ]
+      @=? hush (parseAddressPatterns "127.0.0.1, 10.1.2.3/16 ::1")
+  , Nothing @=? hush (parseAddressPatterns "10.0.0.0/33")
+  , Nothing @=? hush (parseAddressPatterns "example.com")
   , Just "a+b c" @=? urlDecode False "a+b%20c"
   , Just "a b c" @=? urlDecode True "a+b%20c"
   ]
@@ -95,7 +108,7 @@ json = TestCase $
 endpoints :: IO ()
 endpoints = do
   sock <- socket AF_INET Stream 0
-  let conf = WebConfig sock lists Nothing (return ())
+  let conf = WebConfig sock lists Nothing (return ()) []
       get' path client = handleRequest conf now networkState client local
         (maybe (error "bad request") id $ parseRequest $
            B.concat ["GET ", path, " HTTP/1.1"])
@@ -163,13 +176,33 @@ endpoints = do
   -- misc
   404 @=? status (get' "/nope" client)
   let post = handleRequest conf now networkState client local
-               (Request "POST" "/api/ip" [])
+               (Request "POST" "/api/ip" [] [])
   (405, Just "GET, HEAD") @=? (status post, lookup "Allow" (respHeaders post))
   let headR = handleRequest conf now networkState client local
-                (Request "HEAD" "/api/ip" [])
+                (Request "HEAD" "/api/ip" [] [])
   True @=? respHead headR
   "HTTP/1.1 200 OK\r\n" `B.isPrefixOf` renderResponse headR @? "status line"
   "\r\n\r\n" `B.isSuffixOf` renderResponse headR @? "HEAD has no body"
+
+  -- X-Forwarded-For is believed only from trusted proxies, read from the
+  -- right, skipping trusted proxies
+  let proxied = conf { webTrustedProxies =
+                         [Net4 (ip "10.1.0.0") 0xffff0000, Net4 (ip "127.0.0.1") 0xffffffff] }
+      viaProxy xff peer = respBody $ handleRequest proxied now networkState peer
+        local (Request "GET" "/api/ip" [] [("x-forwarded-for", xff)])
+      proxy = SockAddrInet 40000 (htonl $ ip "127.0.0.1")
+      -- the value of "IP" in {"IsTor":...,"IP":"..."}
+      ipOf' b = B.takeWhile (/= '"') . B.drop 6 . snd $
+                  B.breakSubstring "\"IP\":\"" b
+  "10.0.0.99" @=? ipOf' (viaProxy "1.1.1.1, 10.0.0.99, 10.1.2.3" proxy)
+  "\"IsTor\":true" `B.isInfixOf` viaProxy "10.0.0.99" proxy
+    @? "a Tor exit behind the proxy"
+  -- from a client that isn't a trusted proxy, the header is ignored
+  "192.0.2.1" @=? ipOf' (viaProxy "10.0.0.99" client)
+  -- all trusted: the leftmost; malformed: the proxy itself
+  "10.1.9.9" @=? ipOf' (viaProxy "10.1.9.9, 10.1.2.3" proxy)
+  "127.0.0.1" @=? ipOf' (viaProxy "10.0.0.99, junk" proxy)
+  "2001:db8::1" @=? ipOf' (viaProxy "[2001:db8::1]" proxy)
   where
     lists = M.fromList
       [("examplenet", [AddrPortPattern (ip "198.51.100.0") 0xffffff00

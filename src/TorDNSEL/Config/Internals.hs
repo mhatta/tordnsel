@@ -66,6 +66,7 @@ import System.IO (IOMode(ReadWriteMode), hClose)
 import System.Posix.Files (setOwnerAndGroup)
 import System.Posix.Types (UserID)
 
+import TorDNSEL.AddressPattern
 import TorDNSEL.Control.Concurrent.Link
 import TorDNSEL.Control.Concurrent.Util
 import TorDNSEL.DNS
@@ -108,6 +109,8 @@ data Config = Config
     -- | Responses per second allowed over UDP to each client network, or 0
     -- for no limit.
   , cfDNSRateLimit        :: Int
+    -- | Reverse proxies whose X-Forwarded-For headers we believe.
+  , cfHTTPTrustedProxies  :: [AddressPattern]
   } deriving Show
 
 -- | Exit test configuration options.
@@ -145,12 +148,14 @@ knownConfigItems
   , "ExitList"
   , "HTTPListenAddress"
   , "HTTPPublicAddress"
-  , "DNSRateLimit" ]
+  , "DNSRateLimit"
+  , "HTTPTrustedProxy" ]
 
 -- | Config items that may be given more than once. Their values are joined
 -- with newlines.
 multiValuedConfigItems :: Set ByteString
-multiValuedConfigItems = S.fromList . map toItem $ [ "ExitList" ]
+multiValuedConfigItems = S.fromList . map toItem $
+  [ "ExitList", "HTTPTrustedProxy" ]
 
 -- | Merge in default config options, check for missing options, and parse
 -- individual config values.
@@ -178,7 +183,8 @@ makeConfig conf =
     "ExitList" `app`
     "HTTPListenAddress" `app`
     "HTTPPublicAddress" `ap`
-    rateLimit
+    rateLimit `app`
+    "HTTPTrustedProxy"
   where
     conf' = M.union conf . M.fromList . map (toItem *** toItem) $
       [ "DNSListenAddress"    ~> "127.0.0.1:53"
@@ -303,6 +309,13 @@ instance ConfigValue (HostAddress, Port) where
       case B.split ':' val of
         [addr,port] -> liftM2 (,) (inet_atoh addr) (parsePort port)
         _ -> throwError $ cat "Malformed address/port " (esc 32 val) '.'
+
+-- | Addresses and networks, e.g. for @HTTPTrustedProxy@. Optional: none
+-- given means an empty list.
+instance ConfigValue [AddressPattern] where
+  parse item conf = case M.lookup (B.map toLower item) conf of
+    Nothing -> return []
+    Just val -> prependOnFail item $ parseAddressPatterns val
 
 -- | Named exit lists, one per (newline-separated) @ExitList@ value. The
 -- option is optional: no lists means \"list\" queries are disabled.

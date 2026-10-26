@@ -241,6 +241,15 @@ The IPv4 address and port at which clients reach the HTTP interface, if it
 differs from \fBHTTPListenAddress\fR (e.g. behind NAT or a port redirection).
 Used by /api/ip. (Default: the address of the listening socket)
 .TP
+\fBHTTPTrustedProxy \fR\fIADDRESS\fR[\fB/\fR\fIBITS\fR] ...\fP
+Reverse proxies in front of the HTTP interface: for requests from these IPv4
+addresses or networks, or IPv6 addresses, the client is taken from the
+X-Forwarded-For header, read from the right and skipping these proxies. This
+affects /api/ip and /api/v1/me, and the proxies are exempt from the limit on
+connections per client. Without it the header is ignored. May be given more
+than once. Set \fBHTTPPublicAddress\fR to the proxy's public address as well.
+(Default: none)
+.TP
 \fBDNSRateLimit \fR\fINUM\fP
 Answer at most \fINUM\fR queries per second over UDP from each client
 network (an IPv4 /24 or an IPv6 /56), allowing bursts of up to \fINUM\fR

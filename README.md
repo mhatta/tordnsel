@@ -76,6 +76,10 @@ The HTTP interface (enabled with `HTTPListenAddress`) serves the same data:
 | `GET /torbulkexitlist[?ip=IP[&port=PORT]]` | Exit addresses, one per line |
 | `GET /exit-addresses` | Results of active exit tests |
 
+Behind a reverse proxy, set `HTTPTrustedProxy` to the proxy's address so that
+`/api/ip` and `/api/v1/me` see the real client (from `X-Forwarded-For`), and
+`HTTPPublicAddress` to its public address.
+
 ## Building
 
 TorDNSEL is written in Haskell. It builds with GHC 9.4 or newer (tested with

@@ -569,6 +569,7 @@ mkWebConfig conf sock = WebConfig
   { webSocket = sock
   , webLists = cfExitLists conf
   , webPublicAddress = cfHTTPPublicAddress conf
+  , webTrustedProxies = cfHTTPTrustedProxies conf
   , webRequestStats = incrementHTTPRequests }
 
 -- | Return the exit test config.

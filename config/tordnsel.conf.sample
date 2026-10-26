@@ -119,6 +119,12 @@
 ## /api/ip uses it to check whether an exit can reach us.
 #HTTPPublicAddress 10.0.0.1:80
 
+## Behind a reverse proxy, believe the X-Forwarded-For header of requests
+## from these addresses (IPv4 addresses or networks, IPv6 addresses), so
+## that /api/ip and /api/v1/me see the real client. May be given more than
+## once. Set HTTPPublicAddress to the proxy's public address too.
+#HTTPTrustedProxy 127.0.0.1 ::1
+
 ################ Active testing options ###################################
 ##
 ## These options are only necessary if you want to enable active testing

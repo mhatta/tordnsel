@@ -85,6 +85,7 @@ import Network.Socket
 import Network.Socket.ByteString (recv, sendAll)
 import System.Timeout (timeout)
 
+import TorDNSEL.AddressPattern
 import TorDNSEL.Control.Concurrent.Link
 import TorDNSEL.Control.Concurrent.Util
 import TorDNSEL.Directory (encodeBase16RouterID)
@@ -109,11 +110,14 @@ data WebConfig = WebConfig
   , webPublicAddress :: !(Maybe (HostAddress, Port))
     -- | Count requests for statistics.
   , webRequestStats  :: !(IO ())
+    -- | Reverse proxies whose X-Forwarded-For headers we believe.
+  , webTrustedProxies :: ![AddressPattern]
   }
 
 instance Eq WebConfig where
   x == y = webSocket x == webSocket y && webLists x == webLists y &&
-           webPublicAddress x == webPublicAddress y
+           webPublicAddress x == webPublicAddress y &&
+           webTrustedProxies x == webTrustedProxies y
 
 -- | A handle to the web server thread.
 data WebServer = WebServer (WebMessage -> IO ()) ThreadId
@@ -155,8 +159,10 @@ startWebServer initConf = do
       message <- readMsgChan chan
       case message of
         NewClient client addr
-          -- One client may not take all the handlers.
-          | M.findWithDefault 0 key (perClient s) >= maxPerClient -> do
+          -- One client may not take all the handlers (except a reverse proxy
+          -- we trust, which speaks for many).
+          | not (trusted addr)
+          , M.findWithDefault 0 key (perClient s) >= maxPerClient -> do
               log Debug "Web client " addr " has too many connections."
               closeSocket client `E.finally` signalQSem sem
               loop s
@@ -174,6 +180,8 @@ startWebServer initConf = do
           loop s { handlers = M.insert handler key (handlers s)
                  , perClient = M.insertWith (+) key 1 (perClient s) }
           where key = clientKey addr
+                trusted = maybe False (matchesAny (webTrustedProxies (webConf s)))
+                          . hostAddressOf
 
         Reconfigure reconf signal -> do
           let newConf = reconf (webConf s)
@@ -299,9 +307,11 @@ readRequestHead sock = go B.empty
 
 -- | An HTTP request.
 data Request = Request
-  { reqMethod :: !ByteString               -- ^ The method, e.g. @GET@.
-  , reqPath   :: !ByteString               -- ^ The decoded path.
-  , reqQuery  :: ![(ByteString, ByteString)] -- ^ Decoded query parameters.
+  { reqMethod  :: !ByteString               -- ^ The method, e.g. @GET@.
+  , reqPath    :: !ByteString               -- ^ The decoded path.
+  , reqQuery   :: ![(ByteString, ByteString)] -- ^ Decoded query parameters.
+    -- | Header fields, names in lower case, in order.
+  , reqHeaders :: ![(ByteString, ByteString)]
   } deriving (Eq, Show)
 
 -- | An HTTP response.
@@ -313,7 +323,8 @@ data Response = Response
   , respHead    :: !Bool -- ^ Omit the body (a response to @HEAD@).
   } deriving (Eq, Show)
 
--- | Parse the request line of an HTTP request. Headers are ignored.
+-- | Parse the head of an HTTP request: the request line and the header
+-- fields. Header lines without a colon are ignored.
 parseRequest :: ByteString -> Maybe Request
 parseRequest raw = case B.words requestLine of
   [method, target, version]
@@ -323,10 +334,17 @@ parseRequest raw = case B.words requestLine of
         path' <- urlDecode False path
         params <- mapM param . filter (not . B.null) . B.split '&' $
                     B.drop 1 query
-        return $ Request method path' params
+        return $ Request method path' params headers
   _ -> Nothing
   where
-    requestLine = B.takeWhile (\c -> c /= '\r' && c /= '\n') raw
+    requestLine : headerLines =
+      map (B.takeWhile (/= '\r')) (B.lines raw) ++ [B.empty | B.null raw]
+    headers = [ (B.map toLower name, trim (B.drop 1 value))
+              | line <- headerLines
+              , let (name, value) = B.break (== ':') line
+              , not (B.null value), not (B.null name) ]
+    trim = B.dropWhile isSpaceC . fst . B.spanEnd isSpaceC
+    isSpaceC c = c == ' ' || c == '\t'
     param p = do
       let (k,v) = B.break (== '=') p
       k' <- urlDecode True k
@@ -402,7 +420,7 @@ renderJSON = B.concat . go
 -- of the client and the local address of the connection.
 handleRequest :: WebConfig -> POSIXTime -> NetworkState -> SockAddr -> SockAddr
               -> Request -> Response
-handleRequest conf now ns clientAddr localAddr req
+handleRequest conf now ns peerAddr localAddr req
   | method `notElem` [B.pack "GET", B.pack "HEAD"] =
       (errorResponse 405 "Method Not Allowed" "only GET and HEAD are supported")
         { respHeaders = [ (B.pack "Allow", B.pack "GET, HEAD")
@@ -411,6 +429,7 @@ handleRequest conf now ns clientAddr localAddr req
   where
     method = reqMethod req
     path = reqPath req
+    clientAddr = clientAddress (webTrustedProxies conf) peerAddr req
     params = reqQuery req
     lists = webLists conf
 
@@ -538,6 +557,36 @@ handleRequest conf now ns clientAddr localAddr req
       , "      All Tor exit addresses (permitting connections to IP:PORT)."
       , "  GET /exit-addresses"
       , "      Results of active exit tests." ]
+
+-- | The address of the client a request is from. That's the address of the
+-- connection, unless it comes from a reverse proxy we trust: then it's the
+-- last address in X-Forwarded-For that isn't one of those proxies (each proxy
+-- appends the address it got the request from, and only the ones we trust
+-- can be believed). If the header is missing or malformed, it's the proxy.
+clientAddress :: [AddressPattern] -> SockAddr -> Request -> SockAddr
+clientAddress trusted peer req
+  | Just peerHost <- hostAddressOf peer, matchesAny trusted peerHost
+  , not (null forwarded)
+  = case mapM parseHost (reverse forwarded) of
+      Nothing -> peer
+      Just hosts -> case dropWhile (matchesAny trusted) hosts of
+        h : _ -> toSockAddr h
+        []    -> toSockAddr (last hosts)
+  | otherwise = peer
+  where
+    forwarded = [ entry | (name, value) <- reqHeaders req
+                        , name == B.pack "x-forwarded-for"
+                        , entry <- map trim (B.split ',' value)
+                        , not (B.null entry) ]
+    trim = B.dropWhile (== ' ') . fst . B.spanEnd (== ' ')
+    parseHost e
+      | Right a <- inet_atoh e = Just (Host4 a)
+      | Right a <- inet_atoh6 (unbracket e) = Just (Host6 a)
+      | otherwise = Nothing
+    unbracket e | B.pack "[" `B.isPrefixOf` e = B.takeWhile (/= ']') (B.drop 1 e)
+                | otherwise = e
+    toSockAddr (Host4 a) = SockAddrInet 0 (htonl a)
+    toSockAddr (Host6 a) = SockAddrInet6 0 0 a 0
 
 -- | The IPv4 address of a socket address, if it has one.
 ipv4Of :: SockAddr -> Maybe HostAddress
