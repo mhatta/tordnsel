@@ -21,6 +21,7 @@ import Control.Monad (replicateM)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as BC
 import qualified Data.List as L
+import qualified Data.Bits as Bits
 import Data.Word (Word8)
 import Network.Socket (SockAddr(..))
 import Test.HUnit (Test(..), assertFailure)
@@ -44,6 +45,8 @@ tests = TestList
   , prop "decoding damaged messages doesn't crash" decodeDamaged
   , prop "decode . encode == id" roundTrip
   , prop "re-encoding a decoded message loses nothing" reencode
+  , prop "EDNS options: round trip, and total" ednsOptionsProp
+  , prop "client subnet option: round trip, and total" clientSubnetProp
   , prop "SOCKS responses: round trip, and total" socks
   , prop "AUTHCHALLENGE replies: parsing is total" authChallenge
   , prop "HTTP requests: parsing is total" httpRequests
@@ -186,6 +189,32 @@ instance Arbitrary Class where
 
 orElse :: Gen a -> Gen a -> Gen a
 orElse a b = frequency [(3, a), (1, b)]
+
+ednsOptionsProp :: Property
+ednsOptionsProp = valid .&&. total
+  where
+    valid = forAll (listOf ((,) <$> arbitrary <*> (B.pack <$> resize 40 (listOf arbitrary)))) $
+      \opts -> parseEDNSOptions (renderEDNSOptions opts) === Just opts
+    total = forAll (B.pack <$> arbitrary) $ \bs ->
+      noException (maybe () (const ()) (parseEDNSOptions bs))
+
+clientSubnetProp :: Property
+clientSubnetProp = valid .&&. total
+  where
+    -- a valid IPv4 or IPv6 subnet: the right number of address bytes, and
+    -- no bits beyond the prefix
+    valid = forAll genSubnet $ \cs ->
+      parseClientSubnet (renderClientSubnet cs) === Just cs
+    genSubnet = do
+      (family, maxBits) <- elements [(1, 32), (2, 128 :: Int)]
+      source <- choose (0, maxBits)
+      bytes <- vector ((source + 7) `div` 8)
+      let bytes' | source `mod` 8 == 0 || null bytes = bytes
+                 | otherwise = init bytes ++
+                     [last bytes Bits..&. (0xff `Bits.shiftL` (8 - source `mod` 8))]
+      return $ ClientSubnet family (fromIntegral source) 0 (B.pack bytes')
+    total = forAll (B.pack <$> arbitrary) $ \bs ->
+      noException (maybe () (const ()) (parseClientSubnet bs))
 
 --------------------------------------------------------------------------------
 -- SOCKS and the control port

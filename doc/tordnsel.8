@@ -57,8 +57,10 @@ from \fIIP\fR. This is the form used by the Tor Project's exit list service.
 \fB{IP}.{port}.me.\fR\fIzone\fP
 Listed iff \fIIP\fR is a Tor exit that permits connections to \fIport\fR on
 the host that sent the query. Note that if the query comes through a recursive
-resolver, that resolver is the host in question. Answers have a TTL of zero so
-that resolvers don't hand them to other clients.
+resolver, that resolver is the host in question, unless the resolver passes on
+its client's network with the EDNS client subnet option (RFC 7871): then the
+query is about that network's address (see \fBDNSClientSubnet\fR). Answers
+have a TTL of zero so that resolvers don't hand them to other clients.
 .PP
 Other answers are cached for 30 minutes. EDNS(0) is supported. Queries are
 answered over UDP and TCP (RFC 7766); UDP responses too large for the client
@@ -240,6 +242,12 @@ privileges. (Default: none, the HTTP interface is disabled)
 The IPv4 address and port at which clients reach the HTTP interface, if it
 differs from \fBHTTPListenAddress\fR (e.g. behind NAT or a port redirection).
 Used by /api/ip. (Default: the address of the listening socket)
+.TP
+\fBDNSClientSubnet \fR\fBTrue\fR|\fBFalse\fP
+Answer "me" queries about the client subnet given in the EDNS client subnet
+option (RFC 7871), if any, rather than about the resolver asking. With a
+subnet shorter than 32 bits, the query is about its network address. A
+malformed option is answered with FORMERR. (Default: True)
 .TP
 \fBHTTPTrustedProxy \fR\fIADDRESS\fR[\fB/\fR\fIBITS\fR] ...\fP
 Reverse proxies in front of the HTTP interface: for requests from these IPv4

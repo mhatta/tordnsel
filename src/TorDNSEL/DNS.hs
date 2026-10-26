@@ -42,6 +42,11 @@ module TorDNSEL.DNS (
   , findEDNS
   , ednsRecord
   , badVersRCode
+  , ClientSubnet(..)
+  , clientSubnetOption
+  , parseClientSubnet
+  , renderClientSubnet
+  , clientSubnetIPv4
   ) where
 
 import TorDNSEL.DNS.Internals

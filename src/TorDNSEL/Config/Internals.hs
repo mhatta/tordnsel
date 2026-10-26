@@ -111,6 +111,8 @@ data Config = Config
   , cfDNSRateLimit        :: Int
     -- | Reverse proxies whose X-Forwarded-For headers we believe.
   , cfHTTPTrustedProxies  :: [AddressPattern]
+    -- | Use the EDNS client subnet option for \"me\" queries.
+  , cfDNSClientSubnet     :: Bool
   } deriving Show
 
 -- | Exit test configuration options.
@@ -149,7 +151,8 @@ knownConfigItems
   , "HTTPListenAddress"
   , "HTTPPublicAddress"
   , "DNSRateLimit"
-  , "HTTPTrustedProxy" ]
+  , "HTTPTrustedProxy"
+  , "DNSClientSubnet" ]
 
 -- | Config items that may be given more than once. Their values are joined
 -- with newlines.
@@ -184,7 +187,8 @@ makeConfig conf =
     "HTTPListenAddress" `app`
     "HTTPPublicAddress" `ap`
     rateLimit `app`
-    "HTTPTrustedProxy"
+    "HTTPTrustedProxy" `app`
+    "DNSClientSubnet"
   where
     conf' = M.union conf . M.fromList . map (toItem *** toItem) $
       [ "DNSListenAddress"    ~> "127.0.0.1:53"
@@ -193,7 +197,8 @@ makeConfig conf =
       , "EnableActiveTesting" ~> "False"
       , "TorSocksAddress"     ~> "127.0.0.1:9050"
       , "Log"                 ~> "notice stdout"
-      , "DNSRateLimit"        ~> "0" ]
+      , "DNSRateLimit"        ~> "0"
+      , "DNSClientSubnet"     ~> "True" ]
     (~>) = (,)
     f `app` addr = f `ap` parse (B.pack addr) conf'
     rateLimit = do

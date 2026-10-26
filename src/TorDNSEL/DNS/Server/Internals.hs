@@ -55,7 +55,7 @@ import Data.ByteString (ByteString)
 import Data.Char (toLower, toUpper, isDigit)
 import qualified Data.List as L
 import qualified Data.Map as M
-import Data.Maybe (isNothing, maybeToList)
+import Data.Maybe (isJust, isNothing, maybeToList)
 import Data.Time.Clock.POSIX (POSIXTime, getPOSIXTime)
 import Data.Word (Word32)
 import Network.Socket (Socket, HostAddress, SockAddr(..), accept)
@@ -87,6 +87,9 @@ data DNSConfig
   -- | Responses per second allowed over UDP to each client network, or 0
   -- for no limit (see 'rateLimit').
   , dnsRateLimit :: !Int
+  -- | Answer \"me\" queries about the client subnet a resolver gives us
+  -- (RFC 7871) rather than about the resolver.
+  , dnsClientSubnet :: !Bool
   -- | An action invoked with bytes received and sent for recording statistics.
   , dnsByteStats :: !(Int -> Int -> IO ())
   -- | A statistics tracking action invoked with each response.
@@ -95,7 +98,7 @@ data DNSConfig
 instance Eq DNSConfig where
   x == y = all (\(===) -> x === y)
     [ eq dnsSocket, eq dnsTCPSocket, eq dnsAuthZone, eq dnsMyName, eq dnsSOA
-    , eq dnsNS, eq dnsA, eq dnsLists, eq dnsRateLimit ]
+    , eq dnsNS, eq dnsA, eq dnsLists, eq dnsRateLimit, eq dnsClientSubnet ]
     where
       eq :: Eq b => (a -> b) -> a -> a -> Bool
       eq = on (==)
@@ -283,6 +286,11 @@ dnsResponse c src msg now ns = withEDNS $ case () of
     | Just e <- edns, ednsVersion e > 0
     -> (Other, r { msgAA = False, msgRCode = fst badVersRCode
                  , msgAnswers = [], msgAuthority = [] })
+    -- malformed EDNS options (RFC 6891, section 7) or client subnet option
+    -- (RFC 7871, section 7.1.1)
+    | Just e <- edns, isNothing (ednsOptions e) || badSubnet
+    -> (Other, r { msgAA = False, msgRCode = FormatError
+                 , msgAnswers = [], msgAuthority = [] })
     -- draft-koch-dns-unsolicited-queries-01
     | isNothing mbQLabels
     -> (Other, r { msgAA = False, msgRCode = Refused
@@ -312,13 +320,39 @@ dnsResponse c src msg now ns = withEDNS $ case () of
     edns = findEDNS msg
     withEDNS (typ,resp) = case edns of
       Nothing -> (typ, resp)
-      Just e  -> (typ, resp { msgAdditional = [ednsRecord ext (ednsDO e)] })
+      Just e  -> (typ, resp { msgAdditional =
+                                [ednsRecord ext (ednsDO e) subnetReply] })
         where ext | ednsVersion e > 0 = snd badVersRCode
                   | otherwise         = 0
 
+    -- The client subnet option (RFC 7871). A "me" query is about the client
+    -- the resolver asks for, so its answer depends on the subnet, which we
+    -- say with a scope equal to the source prefix; other answers don't
+    -- depend on it (scope 0).
+    subnetData = edns >>= ednsOptions >>= lookup clientSubnetOption
+    subnet = subnetData >>= parseClientSubnet
+    badSubnet = isJust subnetData && isNothing subnet
+    useSubnet q = dnsClientSubnet c && isMeQuery q && isJust subnet
+    subnetReply = case subnet of
+      Just cs | rCodeOK -> [(clientSubnetOption, renderClientSubnet cs
+                               { csScopePrefix = if usedSubnet
+                                                   then csSourcePrefix cs
+                                                   else 0 })]
+      _ -> []
+    rCodeOK = not badSubnet
+    usedSubnet = case mbQLabels >>= Just . parseExitListQuery (dnsLists c) of
+      Just (FullQuery q) -> useSubnet q
+      _                  -> False
+
+    -- The IPv4 address the destination of a "me" query is, if any: the
+    -- client subnet's address if we use it, otherwise the asker's.
+    requester q
+      | useSubnet q = subnet >>= clientSubnetIPv4
+      | otherwise   = requesterIPv4 src
+
     isListed q = queryAddr q == testAddress ||
                  maybe False (isExitTo now ns (queryAddr q))
-                       (queryDestination (dnsLists c) src q)
+                       (queryDestination (dnsLists c) (requester q) q)
 
     positive q
       | qt `elem` [TA, TTXT, TAny] =
@@ -445,17 +479,21 @@ testAddress :: HostAddress
 testAddress = 0x7f000002
 
 -- | The destination a query asks about, given the configured lists and the
--- address the query came from. 'Nothing' means no Tor exit node can reach
--- the destination: an unknown list, or a \"me\" query from an IPv6 host
--- (we only have exit policies for IPv4).
-queryDestination :: NamedLists -> SockAddr -> ExitListQuery -> Maybe Destination
+-- IPv4 address of the host a \"me\" query is about. 'Nothing' means no Tor
+-- exit node can reach the destination: an unknown list, or a \"me\" query
+-- about an IPv6 host (we only have exit policies for IPv4).
+queryDestination
+  :: NamedLists -> Maybe HostAddress -> ExitListQuery -> Maybe Destination
 queryDestination _ _ (IPPort _ dAddr dPort) = Just $ DestAddrPort dAddr dPort
 queryDestination lists _ (IPList _ name)  = DestAnyOf `fmap` M.lookup name lists
 queryDestination _ _ (IPExit _)           = Just anyDestination
-queryDestination _ src (IPMe _ dPort)     = case src of
-  SockAddrInet _ addr -> Just $ DestAddrPort (ntohl addr) dPort
-  SockAddrInet6 _ _ (0, 0, 0xffff, addr) _ -> Just $ DestAddrPort addr dPort
-  _ -> Nothing
+queryDestination _ me (IPMe _ dPort)      = (`DestAddrPort` dPort) `fmap` me
+
+-- | The IPv4 address of the host a query came from, if it has one.
+requesterIPv4 :: SockAddr -> Maybe HostAddress
+requesterIPv4 (SockAddrInet _ addr)                     = Just (ntohl addr)
+requesterIPv4 (SockAddrInet6 _ _ (0, 0, 0xffff, addr) _) = Just addr
+requesterIPv4 _                                         = Nothing
 
 -- | A short human-readable explanation of a positive answer, returned in TXT
 -- records (RFC 5782, section 2.1).

@@ -56,8 +56,9 @@ IP. This is the form of the Tor Project's exit list service
 ```
 
 Listed iff IP is a Tor exit permitting connections to port on the host that
-sent the query (which is the recursive resolver, if one is used). Answers are
-sent with a TTL of 0 so that resolvers don't share them.
+sent the query (which is the recursive resolver, if one is used, unless it
+passes on its client's network with the EDNS client subnet option, RFC 7871).
+Answers are sent with a TTL of 0 so that resolvers don't share them.
 
 `127.0.0.2` is always listed, for testing your setup (RFC 5782).
 

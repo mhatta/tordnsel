@@ -70,6 +70,15 @@ module TorDNSEL.DNS.Internals (
   , EDNS(..)
   , findEDNS
   , ednsRecord
+  , parseEDNSOptions
+  , renderEDNSOptions
+
+  -- ** Client subnet (RFC 7871)
+  , ClientSubnet(..)
+  , clientSubnetOption
+  , parseClientSubnet
+  , renderClientSubnet
+  , clientSubnetIPv4
   , ednsUDPSize
   , badVersRCode
   ) where
@@ -793,27 +802,55 @@ data EDNS = EDNS
   , ednsExtRCode    :: !Word8  -- ^ Upper 8 bits of the extended RCODE.
   , ednsVersion     :: !Word8  -- ^ The EDNS version.
   , ednsDO          :: !Bool   -- ^ The DNSSEC OK bit.
+    -- | The options, as (code, data), or 'Nothing' if they are malformed.
+  , ednsOptions     :: !(Maybe [(Word16, ByteString)])
   } deriving (Eq, Show)
 
 -- | Find the EDNS information in a message's additional section, if any.
 findEDNS :: Message -> Maybe EDNS
 findEDNS msg = case [rr | rr@UnsupportedResourceRecord{rrType = TOPT}
                             <- msgAdditional msg] of
-  UnsupportedResourceRecord _ ttl _ cls _ : _ ->
+  UnsupportedResourceRecord _ ttl _ cls rdata : _ ->
     Just $! EDNS (classValue cls) (fromIntegral $ ttl `shiftR` 24)
                  (fromIntegral $ ttl `shiftR` 16) (testBit ttl 15)
+                 (parseEDNSOptions rdata)
   _ -> Nothing
   where
     classValue IN                   = 1
     classValue AnyClass             = 255
     classValue (UnsupportedClass c) = c
 
+-- | Split the RDATA of an OPT record into options: each is a 16-bit code, a
+-- 16-bit length and that many bytes of data.
+parseEDNSOptions :: ByteString -> Maybe [(Word16, ByteString)]
+parseEDNSOptions bs
+  | B.null bs = Just []
+  | B.length bs < 4 = Nothing
+  | B.length rest < len = Nothing
+  | otherwise = ((code, B.take len rest) :) `fmap` parseEDNSOptions (B.drop len rest)
+  where
+    code = word16 0
+    len = fromIntegral (word16 2) :: Int
+    rest = B.drop 4 bs
+    word16 :: Int -> Word16
+    word16 i = fromIntegral (B.index bs i) `shiftL` 8 .|.
+               fromIntegral (B.index bs (i + 1))
+
+-- | The RDATA of an OPT record carrying the given options.
+renderEDNSOptions :: [(Word16, ByteString)] -> ByteString
+renderEDNSOptions = B.concat . concatMap render
+  where
+    render (code, d) = [word16 code, word16 (fromIntegral $ B.length d), d]
+    word16 :: Word16 -> ByteString
+    word16 w = B.pack [fromIntegral (w `shiftR` 8), fromIntegral w]
+
 -- | An OPT pseudo-record advertising our UDP payload size, carrying the given
--- extended RCODE bits and echoing the DO bit (RFC 3225).
-ednsRecord :: Word8 -> Bool -> ResourceRecord
-ednsRecord extRCode dnssecOK =
+-- extended RCODE bits and options and echoing the DO bit (RFC 3225).
+ednsRecord :: Word8 -> Bool -> [(Word16, ByteString)] -> ResourceRecord
+ednsRecord extRCode dnssecOK options =
   UnsupportedResourceRecord (DomainName []) ttl TOPT
-                            (UnsupportedClass ednsUDPSize) B.empty
+                            (UnsupportedClass ednsUDPSize)
+                            (renderEDNSOptions options)
   where
     ttl = (fromIntegral extRCode `shiftL` 24) .|.
           (if dnssecOK then 0x8000 else 0)
@@ -822,6 +859,57 @@ ednsRecord extRCode dnssecOK =
 -- practically all paths (DNS Flag Day 2020).
 ednsUDPSize :: Word16
 ednsUDPSize = 1232
+
+-- | The EDNS option code of the client subnet option.
+clientSubnetOption :: Word16
+clientSubnetOption = 8
+
+-- | The client subnet option (RFC 7871): a resolver tells us the network of
+-- the client it's asking for.
+data ClientSubnet = ClientSubnet
+  { csFamily       :: !Word16     -- ^ 1 for IPv4, 2 for IPv6.
+  , csSourcePrefix :: !Word8      -- ^ How many leading bits of the address.
+  , csScopePrefix  :: !Word8      -- ^ How many the answer depends on.
+  , csAddress      :: !ByteString -- ^ The leading bytes of the address.
+  } deriving (Eq, Show)
+
+-- | Parse the data of a client subnet option. Return 'Nothing' for anything
+-- RFC 7871 (section 7.1.1) says to answer with FORMERR: an unknown family, a
+-- prefix longer than the address, an address of the wrong length or with
+-- bits set beyond the prefix, or a non-zero scope in a query.
+parseClientSubnet :: ByteString -> Maybe ClientSubnet
+parseClientSubnet bs
+  | B.length bs < 4 = Nothing
+  | family `notElem` [1, 2] = Nothing
+  | fromIntegral source > maxBits = Nothing
+  | scope /= 0 = Nothing
+  | B.length addr /= (fromIntegral source + 7) `div` 8 = Nothing
+  | not (B.null addr), source `mod` 8 /= 0
+  , B.last addr .&. (0xff `shiftR` fromIntegral (source `mod` 8)) /= 0
+  = Nothing
+  | otherwise = Just $! ClientSubnet family source scope addr
+  where
+    family = fromIntegral (B.index bs 0) `shiftL` 8 .|. fromIntegral (B.index bs 1)
+    source = B.index bs 2
+    scope = B.index bs 3
+    addr = B.drop 4 bs
+    maxBits = if family == 1 then 32 else 128 :: Int
+
+-- | The data of a client subnet option.
+renderClientSubnet :: ClientSubnet -> ByteString
+renderClientSubnet (ClientSubnet family source scope addr) =
+  B.concat [ B.pack [ fromIntegral (family `shiftR` 8), fromIntegral family
+                    , source, scope ]
+           , addr ]
+
+-- | The IPv4 address of an IPv4 client subnet, with the bits beyond the
+-- prefix zero.
+clientSubnetIPv4 :: ClientSubnet -> Maybe HostAddress
+clientSubnetIPv4 cs
+  | csFamily cs == 1 =
+      Just . List.foldl' (\a b -> a `shiftL` 8 .|. fromIntegral b) 0 . B.unpack .
+        B.take 4 $ csAddress cs `B.append` B.replicate 4 0
+  | otherwise = Nothing
 
 -- | The extended RCODE BADVERS (16), split into the 4 bits carried in the
 -- header and the 8 bits carried in the OPT record.

@@ -250,6 +250,8 @@ check "unknown list"                        "NXDOMAIN"          "$(dns 13.0.200.
 echo "DNS, query type 3 (me; the asker is 127.0.0.1)"
 check "exit A, port 6667"                   "NOERROR 127.0.0.2" "$(dns 11.0.200.10.6667.me.$z)"
 check "exit C, port 6667"                   "NXDOMAIN"          "$(dns 13.0.200.10.6667.me.$z)"
+check "exit C, port 6667, client subnet 10.200.0.1/32" "NOERROR 127.0.0.2" \
+  "$(dns 13.0.200.10.6667.me.$z A +subnet=10.200.0.1/32)"
 check "TTL 0" "0" \
   "$(dig +noall +answer -p "$dns_port" @127.0.0.1 11.0.200.10.6667.me.$z | awk '{print $2}')"
 

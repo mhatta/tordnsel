@@ -30,7 +30,8 @@ import System.Timeout (timeout)
 import Test.HUnit (Test(..), (@=?), (@?), assertFailure)
 
 import TorDNSEL.DNS
-import TorDNSEL.DNS.Internals (Packet(..), encodeMessage, decodeMessage, tcpFrame)
+import TorDNSEL.DNS.Internals
+  (Packet(..), encodeMessage, decodeMessage, tcpFrame, renderEDNSOptions)
 import TorDNSEL.DNS.Server.Internals
 import TorDNSEL.ExitList
 import TorDNSEL.Fixtures
@@ -168,9 +169,54 @@ responses = TestCase $ do
       withAdditional m rrs = m { msgAdditional = rrs }
       (_,r16) = dnsResponse conf client (edns 0) now networkState
       (_,r17) = dnsResponse conf client (edns 1) now networkState
-  Just (EDNS 1232 0 0 True) @=? findEDNS r16
-  (NoError, Just (EDNS 1232 1 0 True))
+  Just (EDNS 1232 0 0 True (Just [])) @=? findEDNS r16
+  (NoError, Just (EDNS 1232 1 0 True (Just [])))
     @=? (msgRCode r17, findEDNS r17)
+
+  -- EDNS client subnet (RFC 7871): "me" queries are about the client
+  -- subnet the resolver gives; the answer's scope says it depends on it
+  let withSubnet bytes m = m { msgAdditional = [UnsupportedResourceRecord
+                                 (DomainName []) 0 TOPT (UnsupportedClass 1232)
+                                 (renderEDNSOptions [(8, B.pack bytes)])] }
+      v4subnet = "\0\1\24\0\198\51\100"         -- 198.51.100.0/24
+      meName = toName ["13","0","0","10","443","me","torhosts","example","com"]
+      askMe cfg bytes = dnsResponse cfg client (withSubnet bytes (query meName TA))
+                                    now networkState
+      -- the source and scope prefixes of the reply's client subnet option,
+      -- which must otherwise be what we sent (a valid option once its scope
+      -- is set back to 0, as in a query)
+      scopeOf m = do
+        e <- findEDNS m
+        opts <- ednsOptions e
+        bs <- lookup 8 opts
+        _ <- parseClientSubnet (B.take 3 bs `B.append` "\0" `B.append` B.drop 4 bs)
+        return (fromEnum (B.index bs 2), fromEnum (B.index bs 3))
+  -- the resolver (192.0.2.1) isn't in 198.51.100.0/24, but its client is
+  let (tc1,rc1) = askMe conf v4subnet
+  typ "tc1" Positive tc1
+  Just (24, 24) @=? scopeOf rc1
+  -- without the option, the query is about the resolver
+  let (tc2,_) = dnsResponse conf client (query meName TA) now networkState
+  typ "tc2" Negative tc2
+  -- answers to other queries don't depend on the subnet: scope 0
+  let (_,rc3) = dnsResponse conf client
+                  (withSubnet v4subnet (query (toName ["11","0","0","10","80","4"
+                     ,"3","2","1","ip-port","torhosts","example","com"]) TA))
+                  now networkState
+  Just (24, 0) @=? scopeOf rc3
+  -- turned off: the option is ignored
+  let (tc4,rc4) = askMe conf { dnsClientSubnet = False } v4subnet
+  typ "tc4" Negative tc4
+  Just (24, 0) @=? scopeOf rc4
+  -- an IPv6 client can't be reached by an IPv4 exit
+  let (tc5,rc5) = askMe conf "\0\2\56\0\32\1\13\184\0\0\1"
+  typ "tc5" Negative tc5
+  Just (56, 56) @=? scopeOf rc5
+  -- malformed: a prefix longer than the address, bits beyond the prefix, a
+  -- scope in a query, an unknown family, a short address
+  mapM_ (\bytes -> FormatError @=? msgRCode (snd $ askMe conf bytes))
+    [ "\0\1\33\0\1\2\3\4\5", "\0\1\23\0\198\51\101"
+    , "\0\1\24\24\198\51\100", "\0\3\0\0", "\0\1\24\0\198\51" ]
 
   -- queries outside our zone are refused
   let (_,r18) = dnsResponse conf client (query (toName ["example","org"]) TA)
@@ -375,6 +421,7 @@ dnsConf sock = DNSConfig
   , dnsA = Nothing
   , dnsLists = lists
   , dnsRateLimit = 0
+  , dnsClientSubnet = True
   , dnsByteStats = \_ _ -> return ()
   , dnsRespStats = const $ return () }
   where zone = toName ["torhosts","example","com"]

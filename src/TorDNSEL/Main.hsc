@@ -559,6 +559,7 @@ mkDNSServerConfig dnsSock dnsTCPSock conf =
     , dnsA = A (cfZoneOfAuthority conf) ttl `fmap` cfAddress conf
     , dnsLists = cfExitLists conf
     , dnsRateLimit = cfDNSRateLimit conf
+    , dnsClientSubnet = cfDNSClientSubnet conf
     , dnsByteStats = incrementBytes
     , dnsRespStats = incrementResponses }
   where DomainName authLabels = cfZoneOfAuthority conf
