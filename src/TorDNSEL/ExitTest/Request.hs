@@ -78,7 +78,9 @@ getRequest client =
       if ln == "" then return $ M.fromList hs
                   else accHeaders (parseHeader ln : hs)
 
-    parseHeader = (B.map toLower *** B.dropWhile isSpace . B.tail) .
+    -- A line without a colon has an empty value (and fails the checks
+    -- below if it matters); don't use the partial 'B.tail' on it.
+    parseHeader = (B.map toLower *** B.dropWhile isSpace . B.drop 1) .
                     B.break (== ':')
 
     checkHeaders reqline headers = do

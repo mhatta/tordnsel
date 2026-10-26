@@ -178,7 +178,9 @@ handleMessage :: ExitTestServerConfig -> ServerState -> ServerMessage
 handleMessage conf s (NewClient sock addr) = do
   tid <- forkLinkIO . (`E.finally` signalQSemN (handlerSem s) 1) .
     E.bracket (socketToHandle sock ReadWriteMode) hClose $ \client -> do
-      r <- timeout readTimeout . E.try $ do
+      -- Anyone can connect here: whatever goes wrong with a request (short of
+      -- an asynchronous exception) concerns that request only.
+      r <- timeout readTimeout . E.tryJust syncExceptions $ do
         r <- getRequest client
         case r of
           Just cookie -> do
@@ -193,8 +195,9 @@ handleMessage conf s (NewClient sock addr) = do
                                    \Connection: close\r\n\r\n"
       case r of
         Just (Left e) -> do
-          let msg | isEOFError e = "Connection closed by other side"
-                  | otherwise    = show e
+          let msg | Just e' <- E.fromException e, isEOFError e'
+                  = "Connection closed by other side"
+                  | otherwise = show e
           log Info "Error reading HTTP request from " (inet_htoa addr) ": " msg
         Nothing -> log Info "Reading HTTP request from " (inet_htoa addr)
                             " timed out."

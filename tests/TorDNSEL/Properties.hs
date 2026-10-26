@@ -31,6 +31,11 @@ import TorDNSEL.DNS.Server.Internals
   (RateDecision(..), rateLimit, emptyRateLimiter)
 import TorDNSEL.Socks.Internals (Response(..), Result(..), decodeResponse)
 import TorDNSEL.TorControl.Internals (parseAuthChallenge)
+import TorDNSEL.ExitTest.Request (getRequest)
+import TorDNSEL.Web.Internals (parseRequest)
+import Network.Socket
+  (socketPair, Family(AF_UNIX), SocketType(Stream), socketToHandle)
+import System.IO (IOMode(ReadWriteMode), hClose)
 import TorDNSEL.Util (Port(..), htonl)
 
 tests :: Test
@@ -41,6 +46,8 @@ tests = TestList
   , prop "re-encoding a decoded message loses nothing" reencode
   , prop "SOCKS responses: round trip, and total" socks
   , prop "AUTHCHALLENGE replies: parsing is total" authChallenge
+  , prop "HTTP requests: parsing is total" httpRequests
+  , prop "exit test requests: reading them doesn't crash" exitTestRequests
   , prop "the rate limiter allows at most rate*(1+t) queries" rateBound ]
 
 -- | Turn a property into a test case.
@@ -210,6 +217,42 @@ authChallenge = forAll text $ \t ->
       , (\a b -> "AUTHCHALLENGE SERVERHASH=" ++ a ++ " SERVERNONCE=" ++ b)
           <$> hex <*> hex ]
     hex = listOf (elements "0123456789abcdefABCDEFxyz")
+
+-- | Lines that look a bit like HTTP: a request line, header-ish lines (with
+-- and without colons) and some body.
+httpish :: Gen B.ByteString
+httpish = do
+  reqLine <- elements [ "POST / HTTP/1.0", "POST / HTTP/1.1", "GET / HTTP/1.1"
+                      , "GET /api/v1/ip-port?ip=1.2.3.4&port=80&dest=5.6.7.8 HTTP/1.1"
+                      , "GET /%zz HTTP/1.0", "" ]
+  hs <- listOf $ oneof
+    [ elements [ "Content-Type: application/octet-stream", "Content-Length: 32"
+               , "Content-Length", "content-type", "Content-Length: x", ":"
+               , "Host: example.com" ]
+    , BC.unpack . B.pack <$> listOf arbitrary ]
+  body <- B.pack <$> resize 64 (listOf arbitrary)
+  let crlf = "\r\n"
+  return $ B.concat [ BC.pack (reqLine ++ crlf ++ concatMap (++ crlf) hs ++ crlf)
+                    , body ]
+
+httpRequests :: Property
+httpRequests = forAll (oneof [httpish, B.pack <$> arbitrary]) $ \bs ->
+  noException (maybe () (const ()) (parseRequest bs))
+
+-- | 'getRequest' reads from anyone who connects to an exit test listener.
+exitTestRequests :: Property
+exitTestRequests = forAll httpish $ \bs -> ioProperty $ do
+  (a, b) <- socketPair AF_UNIX Stream 0
+  ha <- socketToHandle a ReadWriteMode
+  hb <- socketToHandle b ReadWriteMode
+  B.hPut hb bs >> hClose hb
+  r <- E.try (getRequest ha >>= E.evaluate)
+  hClose ha
+  return $ case r of
+    Left (e :: E.SomeException)
+      | Just (_ :: E.IOException) <- E.fromException e -> property True
+      | otherwise -> counterexample (show e) False
+    Right _ -> property True
 
 --------------------------------------------------------------------------------
 -- Rate limiting
