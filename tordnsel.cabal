@@ -83,6 +83,7 @@ library
                     TorDNSEL.ExitTest.Request
                     TorDNSEL.ExitTest.Server
                     TorDNSEL.ExitTest.Server.Internals
+                    TorDNSEL.Files
                     TorDNSEL.Log
                     TorDNSEL.Log.Internals
                     TorDNSEL.Main

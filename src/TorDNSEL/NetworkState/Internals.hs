@@ -82,6 +82,7 @@ import Network.Socket
   , socket, connect, socketToHandle )
 import System.IO (Handle, IOMode(ReadWriteMode))
 import System.IO.Unsafe (unsafePerformIO)
+import System.Timeout (timeout)
 
 import TorDNSEL.Control.Concurrent.Link
 import TorDNSEL.Control.Concurrent.Util
@@ -512,10 +513,15 @@ startTorController net conf mbDelay = liftIO $ do
   (r,tid) <- tryForkLinkIO $ do
     bracketOnError' (socket AF_INET Stream tcpProtoNum) closeSocket $ \sock -> do
       connect sock $ nsmcfTorControlAddr conf
+      -- Whatever answers on the control port may not be Tor and may never
+      -- finish the handshake; don't let it hold us up.
       bracketOnError'
-        ( socketToHandle sock ReadWriteMode >>=
-            \h -> openConnection h (nsmcfTorControlPasswd conf)
-                                 (randBytes (nsmcfRandom conf)) )
+        ( timeout handshakeTimeout
+            ( socketToHandle sock ReadWriteMode >>=
+                \h -> openConnection h (nsmcfTorControlPasswd conf)
+                                     (randBytes (nsmcfRandom conf)) )
+          >>= maybe (E.throwIO $ userError
+                       "The Tor control port handshake timed out.") return )
         closeConnection $ \conn -> do
           setConfWithRollback fetchUselessDescriptors (Just True) conn
           when (torVersion (protocolInfo conn) >= TorVersion 0 2 0 13 B.empty) $
@@ -563,6 +569,7 @@ startTorController net conf mbDelay = liftIO $ do
     backoffFactor = 2
     minDelay = 3
     maxDelay = 300
+    handshakeTimeout = 30 * 10^(6 :: Int)
 
 --------------------------------------------------------------------------------
 -- Exit tests

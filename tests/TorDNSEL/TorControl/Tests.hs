@@ -12,6 +12,9 @@
 -- #hide
 module TorDNSEL.TorControl.Tests (tests) where
 
+import Control.Concurrent (forkIO)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
+import qualified Control.Exception as E
 import qualified Data.ByteString.Char8 as B
 import Data.Conduit (runConduit, (.|))
 import qualified Data.Conduit.List as CL
@@ -20,7 +23,18 @@ import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.Time (hoursToTimeZone)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
-import Test.HUnit (Test(..), (@=?), (@?))
+import Network.Socket
+  (socketPair, Family(AF_UNIX), SocketType(Stream), socketToHandle)
+import System.Directory (getTemporaryDirectory, removeFile)
+import System.IO
+  (IOMode(ReadWriteMode), hClose, hFlush, openBinaryTempFile, hSetBuffering,
+   BufferMode(LineBuffering))
+import System.Posix.Files (createNamedPipe)
+import System.Timeout (timeout)
+import Test.HUnit (Test(..), (@=?), (@?), assertFailure)
+
+import TorDNSEL.Control.Concurrent.Link (withLinksDo)
+import TorDNSEL.Files (readSmallRegularFile)
 
 import TorDNSEL.Directory.Internals
 import TorDNSEL.ExitTest.Request (Cookie(..))
@@ -32,7 +46,8 @@ import TorDNSEL.TorControl.Internals
 import TorDNSEL.Util (encodeBase16)
 
 tests :: Test
-tests = TestList [ protocolInfo', safeCookie, authChallenge, addressMap
+tests = TestList [ protocolInfo', safeCookie, authChallenge, cookieFiles
+                 , fakeTor, addressMap
                  , replies, consensusEvent, consensus, mapping ]
 
 -- | The PROTOCOLINFO reply of Tor 0.4.9.6 with cookie authentication.
@@ -64,6 +79,88 @@ safeCookie = TestCase $ do
     @=? encodeBase16 server
   "9f99f2c4b75c91123ca5c6c6e3f76a9ef7fbd9471053cbe34454a4269cc39f7c"
     @=? encodeBase16 client
+
+-- | Cookie files are read with a length limit, and only if they're regular
+-- files: no FIFOs (which would block) or devices (which could be endless).
+cookieFiles :: Test
+cookieFiles = TestCase $ do
+  tmp <- getTemporaryDirectory
+  (path, h) <- openBinaryTempFile tmp "cookie"
+  B.hPut h (B.replicate 100 'x') >> hClose h
+  r1 <- readSmallRegularFile 33 path
+  33 @=? B.length r1
+  removeFile path
+  r2 <- E.try (readSmallRegularFile 33 "/dev/zero")
+  isLeft' r2 @? "/dev/zero accepted"
+  let fifo = path ++ ".fifo"
+  createNamedPipe fifo 0o600
+  r3 <- timeout 2000000 (E.try (readSmallRegularFile 33 fifo))
+  removeFile fifo
+  case r3 of
+    Nothing -> assertFailure "reading a FIFO blocked"
+    Just r  -> isLeft' r @? "FIFO accepted"
+  where
+    isLeft' :: Either E.IOException a -> Bool
+    isLeft' = either (const True) (const False)
+
+-- | A fake Tor on the control port: whatever it claims, we never send it a
+-- cookie file's contents.
+fakeTor :: Test
+fakeTor = TestCase . withLinksDo $ do
+  tmp <- getTemporaryDirectory
+  (secret, h) <- openBinaryTempFile tmp "secret"
+  B.hPut h (B.pack "32 bytes of a secret file.......") >> hClose h
+  (short, h') <- openBinaryTempFile tmp "short"
+  B.hPut h' (B.pack "too short") >> hClose h'
+  let cookieOnly = "AUTH METHODS=COOKIE COOKIEFILE=\"" ++ secret ++ "\""
+      wrongLength = "AUTH METHODS=COOKIE,SAFECOOKIE COOKIEFILE=\"" ++ short ++ "\""
+  -- COOKIE only: refuse without sending anything after PROTOCOLINFO
+  (ok1, sent1) <- talkTo True cookieOnly
+  (False, ["PROTOCOLINFO 1"]) @=? (ok1, map (B.map toUpperC) sent1)
+  -- SAFECOOKIE, but the "cookie" isn't 32 bytes: same
+  (ok2, sent2) <- talkTo True wrongLength
+  (False, ["PROTOCOLINFO 1"]) @=? (ok2, map (B.map toUpperC) sent2)
+  -- a fake that never answers QUIT doesn't hang us (the QUIT wait is 5 s)
+  r3 <- timeout 15000000 (talkTo False cookieOnly)
+  fmap fst r3 @=? Just False
+  mapM_ removeFile [secret, short]
+  where
+    toUpperC c = if c >= 'a' && c <= 'z' then toEnum (fromEnum c - 32) else c
+    -- Run openConnection against a fake Tor sending the given AUTH line, and
+    -- answering QUIT or not.
+    -- Return whether opening succeeded and the lines the fake Tor received.
+    talkTo answerQuit authLine = do
+      (ours, theirs) <- socketPair AF_UNIX Stream 0
+      ourH <- socketToHandle ours ReadWriteMode
+      theirH <- socketToHandle theirs ReadWriteMode
+      hSetBuffering theirH LineBuffering
+      done <- newEmptyMVar
+      _ <- forkIO $ do
+        l1 <- B.hGetLine theirH
+        B.hPut theirH . B.pack $ concat
+          [ "250-PROTOCOLINFO 1\r\n250-", authLine, "\r\n"
+          , "250-VERSION Tor=\"0.4.9.6\"\r\n250 OK\r\n" ]
+        hFlush theirH
+        -- anything else we receive, until we're closed
+        rest <- collect answerQuit theirH
+        putMVar done (l1 : rest)
+      r <- E.try (openConnection ourH Nothing (\n -> return (B.replicate n 'n')))
+      ok <- case r of
+        Left (_ :: E.SomeException) -> hClose ourH >> return False
+        Right conn -> closeConnection conn >> return True
+      sent <- takeMVar done
+      return (ok, map (B.takeWhile (/= '\r')) . filter (not . isQuit) $ sent)
+    collect answerQuit hd = do
+      r <- E.try (B.hGetLine hd)
+      case r of
+        Left (_ :: E.IOException) -> return []
+        Right l | B.null l -> return []
+                | isQuit l, answerQuit -> do
+                    B.hPut hd (B.pack "250 closing connection\r\n")
+                    hFlush hd >> hClose hd
+                    return [l]
+                | otherwise -> (l :) `fmap` collect answerQuit hd
+    isQuit l = B.map toUpperC (B.take 4 l) == B.pack "QUIT"
 
 -- | Parsing Tor's reply to AUTHCHALLENGE.
 authChallenge :: Test

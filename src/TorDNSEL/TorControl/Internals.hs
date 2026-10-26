@@ -161,6 +161,7 @@ import Data.Sequence ((<|), ViewR((:>)), viewr)
 import Data.Time (UTCTime, TimeZone, localTimeToUTC, getCurrentTimeZone, utc)
 import System.IO (Handle, hClose, hSetBuffering, BufferMode(..), hFlush)
 import System.IO.Error (isEOFError)
+import System.Timeout (timeout)
 
 import           Data.Conduit
 import qualified Data.Conduit.Binary as CB
@@ -170,6 +171,7 @@ import TorDNSEL.Control.Concurrent.Link
 import TorDNSEL.Control.Concurrent.Future
 import TorDNSEL.Control.Concurrent.Util
 import TorDNSEL.Directory
+import TorDNSEL.Files (readSmallRegularFile)
 import TorDNSEL.Document
 import TorDNSEL.Util
 
@@ -246,11 +248,15 @@ closeConnection' conn@(tellIOManager,ioManagerTid) confSettingsMv =
     -- roll back all the registered conf settings
     foldl E.finally (return ()) (map set confSettings)
     `E.finally`
-    (sendCommand' quit True Nothing conn >>= throwIfNotPositive quit . head)
+    -- Don't wait forever for the reply: whatever is on the other end may not
+    -- be Tor, or may be hung.
+    (timeout quitTimeout (sendCommand' quit True Nothing conn)
+       >>= maybe (return ()) (throwIfNotPositive quit . head))
     `E.finally`
     terminateThread Nothing ioManagerTid (tellIOManager CloseConnection)
   where set (ConfSetting var val) = setConf_ var val conn
         quit = Command (B.pack "quit") [] []
+        quitTimeout = 5 * 10^(6 :: Int)
 
 -- | 'ProtocolInfo' associated with a 'Connection'.
 protocolInfo :: Connection -> ProtocolInfo
@@ -283,11 +289,19 @@ data Reply = Reply
 -- or an 'IOError' if reading the authentication cookie fails.
 --
 -- Methods are tried in this order: none needed, the configured password, then
--- the cookie. When Tor offers SAFECOOKIE we use it rather than COOKIE: with
--- COOKIE we would send the cookie itself, so anything listening on the
--- control port (e.g. something that won the race for the port after Tor died)
--- would learn it. With SAFECOOKIE both sides prove knowledge of the cookie
--- without revealing it. @getRandBytes@ supplies the client nonce.
+-- the cookie with SAFECOOKIE, in which both sides prove knowledge of the
+-- cookie without revealing it. @getRandBytes@ supplies the client nonce.
+--
+-- We never use plain COOKIE authentication, which sends the cookie itself:
+-- whatever answers on the control port names the cookie file in its
+-- PROTOCOLINFO reply, so if something other than Tor holds the port (say,
+-- after Tor died) it could make us send it the contents of any file we can
+-- read. Every Tor since 0.2.3 that offers COOKIE also offers SAFECOOKIE. For
+-- the same reason the cookie file is read with 'readSmallRegularFile' and
+-- must be exactly 32 bytes long.
+--
+-- Note that HASHEDPASSWORD authentication sends the password as it is; that's
+-- how the protocol works.
 authenticate
   :: Maybe ByteString -> (Int -> IO ByteString) -> Connection -> IO ()
 authenticate mbPasswd getRandBytes conn = do
@@ -297,9 +311,10 @@ authenticate mbPasswd getRandBytes conn = do
     | hashedPasswordAuth methods, Just _ <- mbPasswd
     -> return $ encodeBase16 `fmap` mbPasswd
     | Just cookiePath <- cookieAuth methods, safeCookieAuth methods
-    -> Just `fmap` (B.readFile cookiePath >>= safeCookie)
-    | Just cookiePath <- cookieAuth methods
-    -> (Just . encodeBase16) `fmap` B.readFile cookiePath
+    -> Just `fmap` (readCookie cookiePath >>= safeCookie)
+    | Just _ <- cookieAuth methods
+    -> protocolError authCommand' ("Tor offers COOKIE but not SAFECOOKIE \
+         \authentication; refusing to send the cookie itself." ++)
     | otherwise                                   -> return Nothing
   let authCommand = Command (B.pack "authenticate") (maybeToList secret) []
   sendCommand authCommand False Nothing conn
@@ -322,6 +337,14 @@ authenticate mbPasswd getRandBytes conn = do
           ("Tor's SERVERHASH doesn't match our cookie; not authenticating." ++)
       return $! encodeBase16 clientHash
     nonceLength = 32
+    authCommand' = Command (B.pack "authenticate") [] []
+    readCookie path = do
+      cookie <- readSmallRegularFile (cookieLength + 1) path
+      unless (BS.length cookie == cookieLength) $
+        protocolError authCommand' $ cat "The cookie file " (esc 256 $ B.pack path)
+          " isn't " cookieLength " bytes long; not authenticating."
+      return cookie
+    cookieLength = 32
 
 -- | Given the authentication cookie, the client nonce and the server nonce,
 -- the hash Tor must send us and the one we must send Tor in SAFECOOKIE

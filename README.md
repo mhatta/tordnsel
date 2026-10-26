@@ -104,10 +104,11 @@ SocksPort 9050
 ```
 
 The cookie file must be readable by the TorDNSEL user (or use
-`HashedControlPassword` with TorDNSEL's `TorControlPassword`). When Tor offers
-SAFECOOKIE (it does whenever cookie authentication is on), TorDNSEL uses it
-instead of sending the cookie itself, and refuses to authenticate if Tor
-can't prove it knows the cookie too. TorDNSEL turns
+`HashedControlPassword` with TorDNSEL's `TorControlPassword`). TorDNSEL
+authenticates with SAFECOOKIE, never sending the cookie itself, and refuses
+to authenticate if Tor can't prove it knows the cookie too. (Password
+authentication sends the password to whatever listens on the control port,
+so prefer the cookie.) TorDNSEL turns
 on `FetchUselessDescriptors` and `FetchDirInfoEarly` while it is connected, so
 that Tor downloads every router descriptor.
 
