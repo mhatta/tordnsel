@@ -179,16 +179,19 @@ truncateMessage msg =
 
 -- | Serve DNS queries arriving over an accepted TCP connection (RFC 7766):
 -- each message is preceded by its length as a 16-bit big-endian integer, and
--- a client may send any number of queries one after another. Answer them in
--- order until the client closes the connection, sends something that isn't a
--- DNS message, or is idle for @idle@ microseconds. The statistics action and
--- handler are as for 'runServer'. Doesn't close the socket.
+-- a client may send queries one after another. Answer them in order until the
+-- client closes the connection, sends something that isn't a DNS message, has
+-- sent @maxQueries@ queries, or makes us wait longer than @idle@ microseconds
+-- (asked anew for each wait, so that it can depend on how busy we are) for a
+-- query or for sending a response. The statistics action and handler are as
+-- for 'runServer'. Doesn't close the socket.
 serveTCPConnection
-  :: Socket -> SockAddr -> Int -> (Int -> Int -> IO ())
+  :: Socket -> SockAddr -> IO Int -> Int -> (Int -> Int -> IO ())
   -> (SockAddr -> Message -> IO (Maybe Message)) -> IO ()
-serveTCPConnection sock addr idle stats handler = loop
+serveTCPConnection sock addr idle maxQueries stats handler = loop maxQueries
   where
-    loop = do
+    loop 0 = return ()
+    loop n = do
       mbLen <- recvTimeout 2
       whenJust mbLen $ \lenBytes -> do
         let len = fromIntegral (B.index lenBytes 0) `shiftL` 8 .|.
@@ -197,14 +200,19 @@ serveTCPConnection sock addr idle stats handler = loop
         whenJust mbPkt $ \pkt ->
           whenJust (decodeMessage (Packet pkt)) $ \query -> do
             response <- handler addr query
-            out <- case response >>= encodeResponse 65535 of
+            sent <- case response >>= encodeResponse 65535 of
               Just bs -> do
-                NSB.sendAll sock (tcpFrame bs)
-                return (2 + B.length bs)
-              Nothing -> return 0
-            stats (2 + len) out
-            loop
-    recvTimeout n = fmap join . timeout idle $ recvExactly sock n
+                -- A client that doesn't read its responses mustn't block us.
+                t <- idle
+                fmap (fmap (const (2 + B.length bs))) . timeout t $
+                  NSB.sendAll sock (tcpFrame bs)
+              Nothing -> return (Just 0)
+            whenJust sent $ \out -> do
+              stats (2 + len) out
+              loop (n - 1 :: Int)
+    recvTimeout k = do
+      t <- idle
+      fmap join . timeout t $ recvExactly sock k
 
 -- | Read exactly @n@ bytes from a stream socket. Return 'Nothing' if the
 -- connection is closed first.

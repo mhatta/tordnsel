@@ -16,10 +16,11 @@
 -- #hide
 module TorDNSEL.DNS.Server.Tests (tests) where
 
-import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent (forkIO, threadDelay, killThread)
 import qualified Control.Exception as E
 import qualified Data.ByteString.Char8 as B
 import qualified Data.Map as M
+import qualified Data.List as L
 import Data.Time.Clock.POSIX (POSIXTime)
 import Network.Socket
   ( Socket, socket, Family(AF_INET), SocketType(Datagram, Stream), SockAddr(..)
@@ -230,6 +231,14 @@ rateLimiting = TestCase $ do
   -- networks whose buckets have filled up again are forgotten
   let (_, rl6) = rateLimit 2 103 (v4 "198.51.100.1") rl3
   M.keys (rlBuckets rl6) @=? [rateKey (v4 "198.51.100.1")]
+  -- at most so many networks are tracked; others are treated as limited
+  let step (ds, rl) a = let (d, rl') = rateLimitWith 2 5 100 (v4 a) rl
+                        in (d : ds, rl')
+      (ds7, rl7) = L.foldl' step ([], emptyRateLimiter)
+                     ["192.0.2.1", "192.0.3.1", "192.0.4.1", "192.0.5.1"
+                     , "192.0.2.2"]
+  [Allow, Allow, Slip, Drop, Allow] @=? reverse ds7
+  2 @=? M.size (rlBuckets rl7)
 
 -- | DNS over TCP on a real connection: pipelined queries are answered in
 -- order, and idle or broken connections are closed.
@@ -242,12 +251,14 @@ tcp = TestCase $ do
   let name = toName ["torhosts","example","com"]
       handler _ q = return . Just $ q { msgQR = True, msgAnswers =
                       [A name ttl (fromIntegral (msgID q))] }
-      -- accept the next connection, in the background
-      serve = do
+      -- accept the next connection, in the background, closing it after 4
+      -- queries or 300 ms of idleness
+      serve = serveWith 300000
+      serveWith idle = do
         _ <- forkIO $ do
           (s, a) <- accept listener
-          serveTCPConnection s a 300000 (\_ _ -> return ()) handler
-            `E.finally` close s
+          serveTCPConnection s a (return idle) 4 (\_ _ -> return ())
+                             handler `E.finally` close s
         return ()
       connectTo = do
         c <- socket AF_INET Stream 0
@@ -283,7 +294,43 @@ tcp = TestCase $ do
   NSB.sendAll c' (B.pack "\0\3abc")
   closed' <- timeout 2000000 (NSB.recv c' 1)
   Just B.empty @=? closed'
-  close c' >> close listener
+  close c'
+
+  -- after 4 queries (the limit given above) the connection is closed, long
+  -- before the 5 s idle timeout
+  serveWith 5000000
+  c'' <- connectTo
+  NSB.sendAll c'' (B.concat $ map frame [1 .. 4])
+  rs' <- mapM (const $ readResponse c'') [1 :: Int .. 4]
+  map (fmap msgID) rs' @=? map Just [1, 2, 3, 4]
+  closed'' <- timeout 1000000 (NSB.recv c'' 1)
+  Just B.empty @=? closed''
+  close c'' >> close listener
+
+  -- one client network gets at most maxTCPConnectionsPerNetwork connections
+  tcpListener <- socket AF_INET Stream 0
+  bind tcpListener (SockAddrInet 0 (htonl $ ip "127.0.0.1"))
+  listen tcpListener 32
+  tcpAddr <- getSocketName tcpListener
+  udp <- socket AF_INET Datagram 0
+  server <- forkIO $ runTCPServer id (dnsConf udp) { dnsTCPSocket = tcpListener }
+  let open1 = do
+        c3 <- socket AF_INET Stream 0
+        connect c3 tcpAddr
+        return c3
+  conns <- mapM (const open1) [0 .. maxTCPConnectionsPerNetwork]
+  threadDelay 200000
+  -- the last one was closed at once; the others are still open
+  let isOpen c3 = do
+        r <- E.try (timeout 100000 (NSB.recv c3 1))
+        return $ case r of
+          Right Nothing -> True
+          Right (Just _) -> False
+          Left (_ :: E.IOException) -> False
+  opens <- mapM isOpen conns
+  (replicate maxTCPConnectionsPerNetwork True ++ [False]) @=? opens
+  mapM_ close conns
+  killThread server >> close tcpListener >> close udp
   where
     recvN c n = go n []
       where go 0 acc = return . Just . B.concat $ reverse acc

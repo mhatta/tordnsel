@@ -58,8 +58,10 @@ that resolvers don't hand them to other clients.
 Other answers are cached for 30 minutes. EDNS(0) is supported. Queries are
 answered over UDP and TCP (RFC 7766); UDP responses too large for the client
 are truncated (TC bit set) so that it retries over TCP. Up to 128 TCP
-connections are served at a time, each closed after 10 seconds without a
-query.
+connections are served at a time, at most 8 from one client network (an IPv4
+/24 or an IPv6 /56). A connection is closed after 100 queries, or after 10
+seconds without a query (2 seconds when more than half of the connections are
+in use).
 
 .SH HTTP INTERFACE
 When \fBHTTPListenAddress\fR is set, the same data is available over HTTP
@@ -224,7 +226,9 @@ Answer at most \fINUM\fR queries per second over UDP from each client
 network (an IPv4 /24 or an IPv6 /56), allowing bursts of up to \fINUM\fR
 queries. Of the queries over the limit, every second one gets a truncated
 response, so that real clients retry over TCP, and the rest are dropped. This
-keeps the server from being used to flood a spoofed address. Note that a busy
+keeps the server from being used to flood a spoofed address. At most 100,000
+client networks are tracked; while that many are, queries from other
+networks are treated as over the limit. Note that a busy
 recursive resolver sends many queries from one network, so set this well above
 what your resolvers send. TCP is not limited. (Default: 0, no limit)
 

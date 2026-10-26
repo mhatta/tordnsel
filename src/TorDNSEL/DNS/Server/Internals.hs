@@ -44,7 +44,7 @@ import Prelude hiding (log)
 import qualified Control.Exception as E
 import Control.Monad (when, guard, forever)
 import Data.Bits ((.|.), (.&.), shiftL)
-import Data.IORef (IORef, newIORef, atomicModifyIORef')
+import Data.IORef (IORef, newIORef, readIORef, atomicModifyIORef')
 import qualified Data.ByteString.Char8 as B
 import Data.ByteString (ByteString)
 import Data.Char (toLower, isDigit)
@@ -165,15 +165,28 @@ terminateDNSServer mbWait (DNSServer tid) =
   terminateThread mbWait tid (throwTo tid $ exitReason $ Terminate NormalExit)
 
 -- | Accept connections on the TCP socket and serve each in its own thread
--- ('serveTCPConnection'), at most 'maxTCPConnections' at a time. Connections
--- beyond that are closed right away; clients will retry. Connections that are
--- idle for 'tcpIdleTimeout' are closed (RFC 7766, section 6.2.3).
+-- ('serveTCPConnection'): at most 'maxTCPConnections' at a time, and at most
+-- 'maxTCPConnectionsPerNetwork' from one client network (as for 'rateKey'),
+-- so that one client can't take them all. Connections beyond that are closed
+-- right away; clients will retry. Connections are closed after
+-- 'maxTCPQueriesPerConnection' queries, or when idle for 'tcpIdleTimeout', or
+-- only 'tcpBusyIdleTimeout' when more than half the connections are in use
+-- (RFC 7766, section 6.2.3).
 runTCPServer :: (forall a. IO a -> IO a) -> DNSConfig -> IO ()
 runTCPServer restore conf = do
-  active <- newIORef (0 :: Int)
-  let reserve = atomicModifyIORef' active $ \n ->
-        if n >= maxTCPConnections then (n, False) else (n + 1, True)
-      release = atomicModifyIORef' active $ \n -> (n - 1, ())
+  active <- newIORef (0 :: Int, M.empty :: M.Map RateKey Int)
+  let reserve key = atomicModifyIORef' active $ \(n, perNet) ->
+        let k = M.findWithDefault 0 key perNet
+        in if n >= maxTCPConnections || k >= maxTCPConnectionsPerNetwork
+             then ((n, perNet), False)
+             else ((n + 1, M.insert key (k + 1) perNet), True)
+      release key = atomicModifyIORef' active $ \(n, perNet) ->
+        ((n - 1, M.update (\k -> if k <= 1 then Nothing else Just (k - 1))
+                           key perNet), ())
+      idle = do
+        (n, _) <- readIORef active
+        return $ if 2 * n > maxTCPConnections then tcpBusyIdleTimeout
+                                              else tcpIdleTimeout
   forever $ do
     r <- E.try . accept $ dnsTCPSocket conf
     case r of
@@ -182,12 +195,14 @@ runTCPServer restore conf = do
         log Warn "Accepting a DNS connection over TCP failed: " e
         threadDelay 1000000
       Right (sock, addr) -> do
-        ok <- reserve
+        let key = rateKey addr
+        ok <- reserve key
         if not ok
           then closeSocket sock
           else do
-            let done = closeSocket sock >> release
-                serve = serveTCPConnection sock addr tcpIdleTimeout
+            let done = closeSocket sock >> release key
+                serve = serveTCPConnection sock addr idle
+                          maxTCPQueriesPerConnection
                           (dnsByteStats conf) (dnsHandler conf)
             _ <- forkIO (restore (ignoreErrors serve) `E.finally` done)
                    `E.onException` done
@@ -201,9 +216,21 @@ runTCPServer restore conf = do
 maxTCPConnections :: Int
 maxTCPConnections = 128
 
+-- | How many of them may come from one client network.
+maxTCPConnectionsPerNetwork :: Int
+maxTCPConnectionsPerNetwork = 8
+
+-- | How many queries we answer on one connection before closing it.
+maxTCPQueriesPerConnection :: Int
+maxTCPQueriesPerConnection = 100
+
 -- | How long, in microseconds, a DNS over TCP connection may be idle.
 tcpIdleTimeout :: Int
 tcpIdleTimeout = 10 * 1000000
+
+-- | ... and when more than half of the connections are in use.
+tcpBusyIdleTimeout :: Int
+tcpBusyIdleTimeout = 2 * 1000000
 
 -- | 'dnsHandler' with the per-client rate limit applied, for UDP.
 dnsUDPHandler
@@ -489,7 +516,9 @@ data RateDecision
 -- | The clients we've seen recently: a token bucket per client network.
 data RateLimiter = RateLimiter
   { rlBuckets   :: !(M.Map RateKey Bucket)
-  , rlLastPurge :: !POSIXTime }
+  , rlLastPurge :: !POSIXTime
+    -- | Queries refused because we track too many networks already.
+  , rlOverflow  :: !Int }
 
 -- | A client network: an IPv4 /24 or an IPv6 /56. Rate limiting by network
 -- rather than by address stops an attacker from spreading spoofed queries
@@ -504,7 +533,14 @@ data Bucket = Bucket !Double !POSIXTime !Int
 
 -- | No clients seen.
 emptyRateLimiter :: RateLimiter
-emptyRateLimiter = RateLimiter M.empty 0
+emptyRateLimiter = RateLimiter M.empty 0 0
+
+-- | The most client networks we keep track of. Queries spoofed from random
+-- networks could otherwise make the state grow with the query rate. While we
+-- track this many, queries from other networks are treated as over their
+-- limit (so every second one still gets a truncated response).
+maxRateBuckets :: Int
+maxRateBuckets = 100000
 
 -- | Given the number of responses per second allowed to each client network,
 -- the current time and a query's source, decide what to do with the query.
@@ -515,8 +551,17 @@ emptyRateLimiter = RateLimiter M.empty 0
 -- spoofed flood is then reflected at a fraction of its own size, while real
 -- clients still get through over TCP (cf. BIND's RRL "slip 2").
 rateLimit :: Int -> POSIXTime -> SockAddr -> RateLimiter -> (RateDecision, RateLimiter)
-rateLimit rate now src (RateLimiter buckets lastPurge) =
-  (decision, RateLimiter (M.insert key bucket' buckets') lastPurge')
+rateLimit = rateLimitWith maxRateBuckets
+
+-- | 'rateLimit' tracking at most the given number of networks.
+rateLimitWith :: Int -> Int -> POSIXTime -> SockAddr -> RateLimiter
+              -> (RateDecision, RateLimiter)
+rateLimitWith maxBuckets rate now src (RateLimiter buckets lastPurge overflow)
+  | not (key `M.member` buckets'), M.size buckets' >= maxBuckets =
+      ( if even overflow then Slip else Drop
+      , RateLimiter buckets' lastPurge' (overflow + 1) )
+  | otherwise =
+      (decision, RateLimiter (M.insert key bucket' buckets') lastPurge' overflow)
   where
     rate' = fromIntegral rate :: Double
     key = rateKey src
