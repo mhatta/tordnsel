@@ -67,7 +67,7 @@ module TorDNSEL.Web.Internals (
 import Prelude hiding (log)
 import Control.Concurrent.QSem (QSem, newQSem, waitQSem, signalQSem)
 import qualified Control.Exception as E
-import Control.Monad (when, forever, unless)
+import Control.Monad (when, forever, unless, join)
 import Control.Monad.Fix (fix)
 import qualified Data.ByteString.Char8 as B
 import Data.ByteString (ByteString)
@@ -77,7 +77,7 @@ import Data.Maybe (isNothing, mapMaybe)
 import qualified Data.Set as S
 import Data.Time.Clock.POSIX (POSIXTime, getPOSIXTime)
 import Network.Socket
-  (Socket, SockAddr(..), HostAddress, accept, getSocketName)
+  (Socket, SockAddr(..), HostAddress, HostAddress6, accept, getSocketName)
 import Network.Socket.ByteString (recv, sendAll)
 import System.Timeout (timeout)
 
@@ -127,7 +127,10 @@ data WebMessage
 data WebState = WebState
   { webConf         :: !WebConfig
   , listenerTid     :: !ThreadId
-  , handlers        :: !(S.Set ThreadId)
+    -- | Running handlers and the client each one serves.
+  , handlers        :: !(M.Map ThreadId ClientKey)
+    -- | How many handlers each client has.
+  , perClient       :: !(M.Map ClientKey Int)
     -- | Listener threads we killed ourselves, whose exit signals we ignore.
   , deadListeners   :: !(S.Set ThreadId)
   , terminateReason :: !(Maybe ExitReason) }
@@ -142,11 +145,17 @@ startWebServer initConf = do
   tid <- forkLinkIO $ do
     setTrapExit $ (writeMsgChan chan .) . Exit
     initListener <- forkListener chan sem (webSocket initConf)
-    flip fix (WebState initConf initListener S.empty S.empty Nothing) $
+    flip fix (WebState initConf initListener M.empty M.empty S.empty Nothing) $
      \loop (!s) -> do
       message <- readMsgChan chan
       case message of
-        NewClient client addr -> do
+        NewClient client addr
+          -- One client may not take all the handlers.
+          | M.findWithDefault 0 key (perClient s) >= maxPerClient -> do
+              log Debug "Web client " addr " has too many connections."
+              closeSocket client `E.finally` signalQSem sem
+              loop s
+          | otherwise -> do
           let conf = webConf s
           handler <- forkLinkIO . (`E.finally` signalQSem sem) .
                        (`E.finally` closeSocket client) $ do
@@ -157,7 +166,9 @@ startWebServer initConf = do
                 log Debug "Error serving web client " addr ": " e
               Right Nothing -> log Debug "Web client " addr " timed out."
               Right _ -> return ()
-          loop s { handlers = S.insert handler (handlers s) }
+          loop s { handlers = M.insert handler key (handlers s)
+                 , perClient = M.insertWith (+) key 1 (perClient s) }
+          where key = clientKey addr
 
         Reconfigure reconf signal -> do
           let newConf = reconf (webConf s)
@@ -180,7 +191,7 @@ startWebServer initConf = do
           terminateThread Nothing (listenerTid s) (killThread $ listenerTid s)
           pending <- drainMsgChan chan
           sequence_ [closeSocket c | NewClient c _ <- pending]
-          if S.null (handlers s)
+          if M.null (handlers s)
             then exit reason
             else loop s { terminateReason = Just reason }
 
@@ -195,18 +206,32 @@ startWebServer initConf = do
                 else loop s
           | t `S.member` deadListeners s ->
               loop s { deadListeners = S.delete t (deadListeners s) }
-          | t `S.member` handlers s -> do
-              let remaining = S.delete t (handlers s)
+          | Just key <- M.lookup t (handlers s) -> do
+              let remaining = M.delete t (handlers s)
+                  perClient' = M.update (\n -> if n <= 1 then Nothing
+                                                        else Just (n - 1))
+                                        key (perClient s)
               case terminateReason s of
-                Just r | S.null remaining -> exit r
-                _ -> loop s { handlers = remaining }
+                Just r | M.null remaining -> exit r
+                _ -> loop s { handlers = remaining, perClient = perClient' }
           | isAbnormal reason -> exit reason
           | otherwise -> loop s
 
   return $ WebServer (writeMsgChan chan) tid
   where
     maxHandlers = 64
+    maxPerClient = 8
     handlerTimeout = 10 * 10^(6 :: Int)
+
+-- | Who a client is, for limiting connections per client: its IP address.
+data ClientKey = Client4 !HostAddress | Client6 !HostAddress6 | OtherClient
+  deriving (Eq, Ord)
+
+clientKey :: SockAddr -> ClientKey
+clientKey (SockAddrInet _ a)                       = Client4 a
+clientKey (SockAddrInet6 _ _ (0, 0, 0xffff, a) _)  = Client4 (htonl a)
+clientKey (SockAddrInet6 _ _ a _)                  = Client6 a
+clientKey _                                        = OtherClient
 
 -- | Fork the thread accepting connections on the listening socket.
 forkListener :: MsgChan WebMessage -> QSem -> Socket -> IO ThreadId
@@ -231,10 +256,11 @@ terminateWebServer :: Maybe Int -> WebServer -> IO ()
 terminateWebServer mbWait (WebServer send tid) =
   terminateThread mbWait tid (send $ Terminate NormalExit)
 
--- | Read a request from a client, answer it, and close the connection.
+-- | Read a request from a client, answer it, and close the connection. The
+-- request head must arrive within 'headTimeout'.
 serveClient :: WebConfig -> Socket -> SockAddr -> IO ()
 serveClient conf client clientAddr = do
-  raw <- readRequestHead client
+  raw <- fmap join . timeout headTimeout $ readRequestHead client
   response <- case raw >>= parseRequest of
     Nothing -> return $ errorResponse 400 "Bad Request" "malformed request"
     Just req -> do
@@ -243,6 +269,10 @@ serveClient conf client clientAddr = do
       ns <- readNetworkState
       return $ handleRequest conf now ns clientAddr localAddr req
   sendAll client $ renderResponse response
+
+-- | How long, in microseconds, a client may take to send its request.
+headTimeout :: Int
+headTimeout = 3 * 10^(6 :: Int)
 
 -- | Read the request line and headers, up to a limit.
 readRequestHead :: Socket -> IO (Maybe ByteString)

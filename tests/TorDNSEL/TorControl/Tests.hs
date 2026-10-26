@@ -33,7 +33,6 @@ import System.Posix.Files (createNamedPipe)
 import System.Timeout (timeout)
 import Test.HUnit (Test(..), (@=?), (@?), assertFailure)
 
-import TorDNSEL.Control.Concurrent.Link (withLinksDo)
 import TorDNSEL.Files (readSmallRegularFile)
 
 import TorDNSEL.Directory.Internals
@@ -107,7 +106,7 @@ cookieFiles = TestCase $ do
 -- | A fake Tor on the control port: whatever it claims, we never send it a
 -- cookie file's contents.
 fakeTor :: Test
-fakeTor = TestCase . withLinksDo $ do
+fakeTor = TestCase $ do
   tmp <- getTemporaryDirectory
   (secret, h) <- openBinaryTempFile tmp "secret"
   B.hPut h (B.pack "32 bytes of a secret file.......") >> hClose h

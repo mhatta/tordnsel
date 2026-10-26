@@ -11,10 +11,18 @@
 -- #hide
 module TorDNSEL.Web.Tests (tests) where
 
+import Control.Concurrent (threadDelay)
+import qualified Control.Exception as E
 import qualified Data.ByteString.Char8 as B
 import qualified Data.Map as M
-import Network.Socket (socket, Family(AF_INET), SocketType(Stream), SockAddr(..))
+import Data.Time.Clock.POSIX (getPOSIXTime)
+import Network.Socket
+  ( socket, Family(AF_INET), SocketType(Stream), SockAddr(..), bind, listen
+  , connect, getSocketName, close )
+import qualified Network.Socket.ByteString as NSB
+import System.Timeout (timeout)
 import Test.HUnit (Test(..), (@=?), (@?))
+
 
 import TorDNSEL.ExitList
 import TorDNSEL.Fixtures
@@ -22,7 +30,46 @@ import TorDNSEL.Util
 import TorDNSEL.Web.Internals
 
 tests :: Test
-tests = TestList [requests, json, TestCase endpoints]
+tests = TestList [requests, json, TestCase endpoints, TestCase limits]
+
+-- | One client can't take all the handlers, and must send its request
+-- promptly.
+limits :: IO ()
+limits = do
+  listener <- socket AF_INET Stream 0
+  bind listener (SockAddrInet 0 (htonl $ ip "127.0.0.1"))
+  listen listener 32
+  addr <- getSocketName listener
+  web <- startWebServer (WebConfig listener M.empty Nothing (return ()))
+  let open1 = do
+        c <- socket AF_INET Stream 0
+        connect c addr
+        return c
+      -- closed (or answered with an error before being closed) in time
+      closedWithin us c = do
+        r <- E.try (timeout us (NSB.recv c 1))
+        return $ case r of
+          Right (Just _)  -> True
+          Right Nothing   -> False
+          Left (_ :: E.IOException) -> True
+  silent <- mapM (const open1) [1 .. 8 :: Int]
+  threadDelay 100000
+  -- the ninth connection from this address is closed at once
+  ninth <- open1
+  closedWithin 1000000 ninth >>= (@? "ninth connection kept open")
+  -- the silent ones are closed after the 3 s request timeout
+  t0 <- getPOSIXTime
+  closed <- mapM (closedWithin 5000000) silent
+  t1 <- getPOSIXTime
+  and closed @? "silent connections kept open"
+  (t1 - t0 < 4) @? "silent connections closed too late"
+  -- and then requests are served again
+  c <- open1
+  NSB.sendAll c "GET /api/v1/lists HTTP/1.0\r\n\r\n"
+  r <- timeout 2000000 (NSB.recv c 100)
+  fmap (B.isPrefixOf "HTTP/1.1 200") r @=? Just True
+  mapM_ close (c : ninth : silent)
+  terminateWebServer Nothing web
 
 requests :: Test
 requests = TestList . map TestCase $
