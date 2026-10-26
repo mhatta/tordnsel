@@ -122,6 +122,14 @@ endpoints = do
   "{\"examplenet\":[\"198.51.100.0/24:6667\"]}\n" @=?
     body (get' "/api/v1/lists" client)
 
+  -- "exit": is the address an exit at all, and which relays exit from it
+  (200, "{\"query\":\"exit\",\"ip\":\"10.0.0.99\",\"listed\":true,\
+        \\"fingerprints\":[\"6161616161616161616161616161616161616161\"]}\n")
+    @=? (\r -> (status r, body r)) (get' "/api/v1/exit?ip=10.0.0.99" client)
+  "\"listed\":false" `B.isInfixOf` body (get' "/api/v1/exit?ip=10.0.0.12" client)
+    @? "exit query, router not running"
+  400 @=? status (get' "/api/v1/exit?ip=10.0.0" client)
+
   -- query type 3: the destination is the HTTP client
   "\"listed\":false" `B.isInfixOf`
     body (get' "/api/v1/me?ip=10.0.0.13&port=443" client)

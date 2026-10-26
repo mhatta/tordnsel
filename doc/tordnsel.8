@@ -49,6 +49,11 @@ Tor exit permitting connections to 1.2.3.4:80.
 Listed iff \fIIP\fR is a Tor exit that permits connections to any member of the
 list \fIlistname\fR, defined with \fBExitList\fR.
 .TP
+\fB{IP}.\fR\fIzone\fP
+Listed iff \fIIP\fR is a Tor exit at all, i.e. its exit policy permits
+connections somewhere. TXT records give the fingerprints of the relays exiting
+from \fIIP\fR. This is the form used by the Tor Project's exit list service.
+.TP
 \fB{IP}.{port}.me.\fR\fIzone\fP
 Listed iff \fIIP\fR is a Tor exit that permits connections to \fIport\fR on
 the host that sent the query. Note that if the query comes through a recursive
@@ -75,6 +80,10 @@ JSON answer to the "list" query, and the configured lists.
 .TP
 \fB/api/v1/me?ip=\fR\fIIP\fR\fB&port=\fR\fIPORT\fP
 JSON answer to the "me" query, where the destination is the HTTP client.
+.TP
+\fB/api/v1/exit?ip=\fR\fIIP\fP
+JSON answer to the "exit" query, with the fingerprints of the relays exiting
+from \fIIP\fR.
 .TP
 \fB/api/ip\fP
 Whether the HTTP client connects from a Tor exit able to reach this server, in

@@ -236,6 +236,12 @@ check "empty non-terminal"                  "NOERROR"           "$(dns 7.100.51.
 check "TXT explanation" \
   'NOERROR 198.51.100.7:80"' "$(dns 11.0.200.10.80.7.100.51.198.ip-port.$z TXT)"
 
+echo "DNS, \"exit\" ({IP}.zone, the Tor Project's form)"
+check "exit B by its tested exit address"   "NOERROR 127.0.0.2" "$(dns 99.0.200.10.$z)"
+check "an authority"                        "NXDOMAIN"          "$(dns 1.0.0.127.$z)"
+check "TXT is one fingerprint" "1" \
+  "$(dig +short -p "$dns_port" @127.0.0.1 11.0.200.10.$z TXT | tr -d '"' | grep -cE '^[0-9A-F]{40}$')"
+
 echo "DNS, query type 2 (list)"
 check "exit C, ircnet"                      "NOERROR 127.0.0.2" "$(dns 13.0.200.10.ircnet.list.$z)"
 check "exit C, web"                         "NOERROR 127.0.0.2" "$(dns 13.0.200.10.web.list.$z)"
@@ -272,6 +278,8 @@ check "/torbulkexitlist" "10.200.0.11 10.200.0.12 10.200.0.99" \
   "$(http '/torbulkexitlist?ip=198.51.100.7&port=80' | tr '\n' ' ' | sed 's/ $//')"
 check "/exit-addresses lists three exits" "3" \
   "$(http /exit-addresses | grep -c '^ExitNode')"
+check "/api/v1/exit lists exit C" '"listed":true' \
+  "$(http '/api/v1/exit?ip=10.200.0.13' | grep -o '"listed":true')"
 check "/api/ip, direct" '{"IsTor":false,"IP":"127.0.0.1"}' "$(http /api/ip)"
 
 echo

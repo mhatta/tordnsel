@@ -24,6 +24,10 @@
 --   Query type 3: is IP a Tor exit that permits connections to PORT on the
 --   host making this HTTP request?
 --
+-- [@GET \/api\/v1\/exit?ip=IP@]
+--   Is IP a Tor exit at all, and which relays exit from it? The same as the
+--   DNS query @{IP}.{zone}@ (and the Tor Project's exit list service).
+--
 -- [@GET \/api\/ip@]
 --   Is the host making this request connecting from a Tor exit (that permits
 --   connections to this web server)? The JSON has the same shape as the one
@@ -71,7 +75,7 @@ import Control.Monad (when, forever, unless, join)
 import Control.Monad.Fix (fix)
 import qualified Data.ByteString.Char8 as B
 import Data.ByteString (ByteString)
-import Data.Char (chr, digitToInt, isHexDigit, toLower, isDigit)
+import Data.Char (chr, digitToInt, isHexDigit, toLower, toUpper, isDigit)
 import qualified Data.Map as M
 import Data.Maybe (isNothing, mapMaybe)
 import qualified Data.Set as S
@@ -83,6 +87,7 @@ import System.Timeout (timeout)
 
 import TorDNSEL.Control.Concurrent.Link
 import TorDNSEL.Control.Concurrent.Util
+import TorDNSEL.Directory (encodeBase16RouterID)
 import TorDNSEL.ExitList
 import TorDNSEL.Log
 import TorDNSEL.NetworkState
@@ -444,6 +449,16 @@ handleRequest conf now ns clientAddr localAddr req
         , (B.pack "dest", maybe JNull showAddr (ipv4Of clientAddr))
         , (B.pack "port", JNumber $ toInteger port)
         , (B.pack "listed", JBool isListed) ]
+    route "/api/v1/exit" = either badRequest id $ do
+      qAddr <- addrParam "ip"
+      let fps = exitFingerprints now ns qAddr anyDestination
+      return . jsonResponse cacheLong $ JObject
+        [ (B.pack "query", JString $ B.pack "exit")
+        , (B.pack "ip", showAddr qAddr)
+        , (B.pack "listed", JBool $ qAddr == 0x7f000002 || not (null fps))
+        , (B.pack "fingerprints",
+             JArray [JString . B.map toUpper $ encodeBase16RouterID fp
+                    | fp <- fps]) ]
     route "/api/ip" =
       let isTor = case (ipv4Of clientAddr, publicAddr) of
             (Just c, Just (a,p)) -> listed' c (DestAddrPort a p)
@@ -515,6 +530,8 @@ handleRequest conf now ns clientAddr localAddr req
       , "      The configured lists."
       , "  GET /api/v1/me?ip=IP&port=PORT"
       , "      Is IP a Tor exit permitting connections to PORT on your host?"
+      , "  GET /api/v1/exit?ip=IP"
+      , "      Is IP a Tor exit, and which relays exit from it?"
       , "  GET /api/ip"
       , "      Are you connecting from a Tor exit?"
       , "  GET /torbulkexitlist[?ip=IP[&port=PORT]]"

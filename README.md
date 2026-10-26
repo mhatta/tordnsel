@@ -38,6 +38,17 @@ defined by the operator, e.g.
 ExitList examplenet 192.0.2.10:6667,6697 198.51.100.0/24:6660-6669
 ```
 
+### "exit", the Tor Project's form
+
+```
+{IP}.exitlist.example.com
+```
+
+Listed iff IP is a Tor exit at all (its exit policy permits connections
+somewhere). The TXT records give the fingerprints of the relays exiting from
+IP. This is the form of the Tor Project's exit list service
+(`dnsel.torproject.org`), so TorDNSEL can stand in for it.
+
 ### Type 3, "me"
 
 ```
@@ -60,6 +71,7 @@ The HTTP interface (enabled with `HTTPListenAddress`) serves the same data:
 | `GET /api/v1/list?ip=IP&list=NAME` | Type 2 query |
 | `GET /api/v1/lists` | The configured lists |
 | `GET /api/v1/me?ip=IP&port=PORT` | Type 3 query |
+| `GET /api/v1/exit?ip=IP` | "exit" query, with the relays' fingerprints |
 | `GET /api/ip` | `{"IsTor":...,"IP":...}` like check.torproject.org |
 | `GET /torbulkexitlist[?ip=IP[&port=PORT]]` | Exit addresses, one per line |
 | `GET /exit-addresses` | Results of active exit tests |

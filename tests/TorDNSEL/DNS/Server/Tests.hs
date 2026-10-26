@@ -74,6 +74,11 @@ parsing = TestList . map TestCase $
   , NoSuchName @=? parse ["list","nosuchlist"]
   , NoSuchName @=? parse ["me","x"]
   , NoSuchName @=? parse ["www"]
+  -- {IP}.{zone}, the form of the Tor Project's service
+  , FullQuery (IPExit (ip "1.2.3.4")) @=? parse ["1","2","3","4"]
+  , PartialQuery @=? parse ["1","2"]
+  , NoSuchName @=? parse ["1","2","3","4","5"]
+  , NoSuchName @=? parse ["1","2","300"]
   , NoSuchName @=? parseExitListQuery M.empty (toLabels ["list"])
   ]
   where parse = parseExitListQuery lists . toLabels
@@ -113,6 +118,21 @@ responses = TestCase $ do
   -- empty non-terminal
   let (_,r7) = ask client TA ["4","3","ip-port"]
   (NoError, []) @=? (msgRCode r7, msgAnswers r7)
+
+  -- "exit" queries: TXT records give the fingerprints, like the Tor
+  -- Project's service
+  let (te1,re1) = ask client TA ["99","0","0","10"]
+  typ "te1" Positive te1
+  [A (rrNameOf re1) ttl 0x7f000002] @=? msgAnswers re1
+  let (_,re2) = ask client TTXT ["99","0","0","10"]
+  [TXT (rrNameOf re2) ttl ["6161616161616161616161616161616161616161"]]
+    @=? msgAnswers re2
+  -- 10.0.0.13 only permits 198.51.100.0/24, but that's an exit all the same;
+  -- 10.0.0.12's last descriptor is too old
+  let (te3,_) = ask client TA ["13","0","0","10"]
+  typ "te3" Positive te3
+  let (te4,_) = ask client TA ["12","0","0","10"]
+  typ "te4" Negative te4
 
   -- query type 2
   let (t8,_) = ask client TA ["11","0","0","10","examplenet","list"]

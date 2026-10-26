@@ -43,6 +43,7 @@ module TorDNSEL.ExitList (
   , isExitTo
   , exitAddressesTo
   , routersExitingFrom
+  , exitFingerprints
   , isRunning
   , maxRouterAge
   , anyDestination
@@ -259,6 +260,14 @@ isExitTo :: POSIXTime -> NetworkState -> HostAddress -> Destination -> Bool
 isExitTo now s addr dest = any ok (routersExitingFrom s addr)
   where ok d = isRunning now d && policyAcceptsDestination dest
                                     (descExitPolicy d)
+
+-- | The identities of the running Tor exit nodes exiting from the given
+-- address whose exit policy permits connections to the destination.
+exitFingerprints
+  :: POSIXTime -> NetworkState -> HostAddress -> Destination -> [RouterID]
+exitFingerprints now s addr dest =
+  [ descRouterID d | d <- routersExitingFrom s addr, isRunning now d
+                   , policyAcceptsDestination dest (descExitPolicy d) ]
 
 -- | All addresses from which running Tor exit nodes whose exit policy permits
 -- connections to the destination may exit, in ascending order.

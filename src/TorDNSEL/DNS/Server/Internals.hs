@@ -21,6 +21,11 @@
 --   permits connections to any member of the operator-configured list
 --   {listname}.
 --
+-- [Query type 0, \"exit\"]
+--   @{IP}.{zone}@ is listed iff {IP} is a Tor exit (one whose exit policy
+--   permits connections somewhere). This is the form of the Tor Project's
+--   own exit list service; TXT records give the relays' fingerprints.
+--
 -- [Query type 3, \"me\"]
 --   @{IP}.{port}.me.{zone}@ is listed iff {IP} is a Tor exit that permits
 --   connections to {port} on the host that sent the query. Because the answer
@@ -47,7 +52,7 @@ import Data.Bits ((.|.), (.&.), shiftL)
 import Data.IORef (IORef, newIORef, readIORef, atomicModifyIORef')
 import qualified Data.ByteString.Char8 as B
 import Data.ByteString (ByteString)
-import Data.Char (toLower, isDigit)
+import Data.Char (toLower, toUpper, isDigit)
 import qualified Data.List as L
 import qualified Data.Map as M
 import Data.Maybe (isNothing, maybeToList)
@@ -59,6 +64,7 @@ import Control.Concurrent (threadDelay)
 import TorDNSEL.Control.Concurrent.Link
 import TorDNSEL.Control.Concurrent.Util
 import TorDNSEL.DNS
+import TorDNSEL.Directory (encodeBase16RouterID)
 import TorDNSEL.ExitList
 import TorDNSEL.Log
 import TorDNSEL.NetworkState
@@ -322,8 +328,16 @@ dnsResponse c src msg now ns = withEDNS $ case () of
       | otherwise = (Positive, emptyAnswer (soaFor q))
       where
         records = [ (TA,   A name (ttlFor q) testAddress)
-                  , (TTXT, TXT name (ttlFor q) [explainListing q]) ]
+                  , (TTXT, TXT name (ttlFor q) (txtFor q)) ]
         wanted t = qt == TAny || qt == t
+
+    -- Like the Tor Project's service, "exit" queries are explained by the
+    -- fingerprints of the exits (upper case hex).
+    txtFor q@(IPExit a)
+      | fps@(_:_) <- exitFingerprints now ns a anyDestination
+      = map (B.map toUpper . encodeBase16RouterID) fps
+      | otherwise = [explainListing q]
+    txtFor q = [explainListing q]
 
     -- Answers to "me" queries depend on the asker, so they mustn't be cached,
     -- not even negatively (RFC 2308 uses the SOA's TTL and MINIMUM).
@@ -395,6 +409,11 @@ data ExitListQuery
   | IPMe
   { queryAddr :: !HostAddress,
     destPort  :: !Port
+  }
+  -- | @{IP}.{zone}@: is the address a Tor exit at all? Compatible with the
+  -- Tor Project's exit list service.
+  | IPExit
+  { queryAddr :: !HostAddress
   } deriving Eq
 
 instance Show ExitListQuery where
@@ -405,6 +424,8 @@ instance Show ExitListQuery where
     cat "query ip: " (inet_htoa qAddr) " list: " name
   showsPrec _ (IPMe qAddr dPort) =
     cat "query ip: " (inet_htoa qAddr) " dest: requester port: " dPort
+  showsPrec _ (IPExit qAddr) =
+    cat "query ip: " (inet_htoa qAddr) " dest: anywhere"
 
 -- | The result of parsing the part of a query name below our zone.
 data ParsedQuery
@@ -430,6 +451,7 @@ testAddress = 0x7f000002
 queryDestination :: NamedLists -> SockAddr -> ExitListQuery -> Maybe Destination
 queryDestination _ _ (IPPort _ dAddr dPort) = Just $ DestAddrPort dAddr dPort
 queryDestination lists _ (IPList _ name)  = DestAnyOf `fmap` M.lookup name lists
+queryDestination _ _ (IPExit _)           = Just anyDestination
 queryDestination _ src (IPMe _ dPort)     = case src of
   SockAddrInet _ addr -> Just $ DestAddrPort (ntohl addr) dPort
   SockAddrInet6 _ _ (0, 0, 0xffff, addr) _ -> Just $ DestAddrPort addr dPort
@@ -445,6 +467,7 @@ explainListing q = B.pack $ case q of
                                   \to list " ++ B.unpack n
   IPMe a p     -> inet_htoa a ++ " is a Tor exit node permitting connections \
                                   \to port " ++ show p ++ " of the querying host"
+  IPExit a     -> inet_htoa a ++ " is a Tor exit node"
 
 -- | Parse an exit list query from a sequence of labels ordered from top to
 -- bottom representing the query portion of a domain name, e.g.
@@ -463,6 +486,9 @@ parseExitListQuery lists labels = case map (B.map toLower . unLabel) labels of
                                            ipList rest
     | typ == B.pack "me"      -> parseWith [port, octet, octet, octet, octet]
                                            ipMe rest
+    -- {IP}.{zone}: the labels from the top are the address in the usual order
+    | octet typ               -> parseWith [octet, octet, octet, octet]
+                                           ipExit (typ : rest)
   _            -> NoSuchName
   where
     parseWith fields mk xs
@@ -478,6 +504,8 @@ parseExitListQuery lists labels = case map (B.map toLower . unLabel) labels of
     ipList _ = Nothing
     ipMe [p,a,b,c,d] = IPMe `fmap` toAddress [a,b,c,d] `ap'` toPort p
     ipMe _ = Nothing
+    ipExit [a,b,c,d] = IPExit `fmap` toAddress [a,b,c,d]
+    ipExit _ = Nothing
 
     ap' mf mx = do { f <- mf; x <- mx; return (f x) }
 
