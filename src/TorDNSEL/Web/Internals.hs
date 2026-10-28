@@ -63,6 +63,8 @@ module TorDNSEL.Web.Internals (
   , parseRequest
   , renderResponse
   , handleRequest
+  , metricsResponse
+  , clientAddress
   , urlDecode
   , JSON(..)
   , renderJSON
@@ -112,12 +114,17 @@ data WebConfig = WebConfig
   , webRequestStats  :: !(IO ())
     -- | Reverse proxies whose X-Forwarded-For headers we believe.
   , webTrustedProxies :: ![AddressPattern]
+    -- | Clients allowed to fetch @\/metrics@ (none: it doesn't exist).
+  , webMetricsAllowFrom :: ![AddressPattern]
+    -- | Render the metrics.
+  , webMetrics       :: !(IO ByteString)
   }
 
 instance Eq WebConfig where
   x == y = webSocket x == webSocket y && webLists x == webLists y &&
            webPublicAddress x == webPublicAddress y &&
-           webTrustedProxies x == webTrustedProxies y
+           webTrustedProxies x == webTrustedProxies y &&
+           webMetricsAllowFrom x == webMetricsAllowFrom y
 
 -- | A handle to the web server thread.
 data WebServer = WebServer (WebMessage -> IO ()) ThreadId
@@ -276,12 +283,34 @@ serveClient conf client clientAddr = do
   raw <- fmap join . timeout headTimeout $ readRequestHead client
   response <- case raw >>= parseRequest of
     Nothing -> return $ errorResponse 400 "Bad Request" "malformed request"
-    Just req -> do
-      localAddr <- getSocketName client
-      now <- getPOSIXTime
-      ns <- readNetworkState
-      return $ handleRequest conf now ns clientAddr localAddr req
+    Just req
+      | reqPath req == B.pack "/metrics" -> metricsResponse conf clientAddr req
+      | otherwise -> do
+          localAddr <- getSocketName client
+          now <- getPOSIXTime
+          ns <- readNetworkState
+          return $ handleRequest conf now ns clientAddr localAddr req
   sendAll client $ renderResponse response
+
+-- | Answer a request for @\/metrics@: Prometheus metrics, for the clients in
+-- 'webMetricsAllowFrom' (judged by 'clientAddress', so a trusted reverse
+-- proxy's clients are judged by their own address), and \"404 Not Found\"
+-- for anyone else, as if there were no such thing.
+metricsResponse :: WebConfig -> SockAddr -> Request -> IO Response
+metricsResponse conf peer req
+  | reqMethod req `notElem` [B.pack "GET", B.pack "HEAD"] =
+      return (errorResponse 405 "Method Not Allowed"
+                "only GET and HEAD are supported")
+        { respHeaders = [ (B.pack "Allow", B.pack "GET, HEAD")
+                        , contentType "application/json" ] }
+  | maybe False (matchesAny (webMetricsAllowFrom conf)) . hostAddressOf $
+      clientAddress (webTrustedProxies conf) peer req = do
+        body <- webMetrics conf
+        return $ Response 200 (B.pack "OK")
+          [ contentType "text/plain; version=0.0.4; charset=utf-8"
+          , (B.pack "Cache-Control", B.pack "no-store") ]
+          body (reqMethod req == B.pack "HEAD")
+  | otherwise = return $ errorResponse 404 "Not Found" "no such resource"
 
 -- | How long, in microseconds, a client may take to send its request.
 headTimeout :: Int

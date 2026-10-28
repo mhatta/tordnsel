@@ -571,6 +571,8 @@ mkWebConfig conf sock = WebConfig
   , webLists = cfExitLists conf
   , webPublicAddress = cfHTTPPublicAddress conf
   , webTrustedProxies = cfHTTPTrustedProxies conf
+  , webMetricsAllowFrom = cfHTTPMetricsAllowFrom conf
+  , webMetrics = currentMetrics VERSION
   , webRequestStats = incrementHTTPRequests }
 
 -- | Return the exit test config.

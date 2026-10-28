@@ -113,6 +113,8 @@ data Config = Config
   , cfHTTPTrustedProxies  :: [AddressPattern]
     -- | Use the EDNS client subnet option for \"me\" queries.
   , cfDNSClientSubnet     :: Bool
+    -- | Clients allowed to fetch metrics from the web interface.
+  , cfHTTPMetricsAllowFrom :: [AddressPattern]
   } deriving Show
 
 -- | Exit test configuration options.
@@ -152,13 +154,14 @@ knownConfigItems
   , "HTTPPublicAddress"
   , "DNSRateLimit"
   , "HTTPTrustedProxy"
-  , "DNSClientSubnet" ]
+  , "DNSClientSubnet"
+  , "HTTPMetricsAllowFrom" ]
 
 -- | Config items that may be given more than once. Their values are joined
 -- with newlines.
 multiValuedConfigItems :: Set ByteString
 multiValuedConfigItems = S.fromList . map toItem $
-  [ "ExitList", "HTTPTrustedProxy" ]
+  [ "ExitList", "HTTPTrustedProxy", "HTTPMetricsAllowFrom" ]
 
 -- | Merge in default config options, check for missing options, and parse
 -- individual config values.
@@ -188,7 +191,8 @@ makeConfig conf =
     "HTTPPublicAddress" `ap`
     rateLimit `app`
     "HTTPTrustedProxy" `app`
-    "DNSClientSubnet"
+    "DNSClientSubnet" `app`
+    "HTTPMetricsAllowFrom"
   where
     conf' = M.union conf . M.fromList . map (toItem *** toItem) $
       [ "DNSListenAddress"    ~> "127.0.0.1:53"

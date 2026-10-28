@@ -241,6 +241,7 @@ responses = TestCase $ do
     show' Positive = "Positive" :: String
     show' Negative = "Negative"
     show' Other    = "Other"
+    show' Limited  = "Limited"
     rrNameOf m = qName (msgQuestion m)
 
 -- | Responses too big for UDP are truncated, so that clients retry over TCP.

@@ -249,6 +249,14 @@ option (RFC 7871), if any, rather than about the resolver asking. With a
 subnet shorter than 32 bits, the query is about its network address. A
 malformed option is answered with FORMERR. (Default: True)
 .TP
+\fBHTTPMetricsAllowFrom \fR\fIADDRESS\fR[\fB/\fR\fIBITS\fR] ...\fP
+Serve Prometheus metrics at /metrics on the HTTP interface to clients at these
+IPv4 addresses or networks, or IPv6 addresses (behind a trusted proxy, the
+client is the one in X-Forwarded-For). Others get "404 Not Found". The metrics
+are the counters of the statistics socket, plus the number of known, running
+and exit relays, of exit addresses listed and of addresses found by exit tests.
+May be given more than once. (Default: none, no metrics)
+.TP
 \fBHTTPTrustedProxy \fR\fIADDRESS\fR[\fB/\fR\fIBITS\fR] ...\fP
 Reverse proxies in front of the HTTP interface: for requests from these IPv4
 addresses or networks, or IPv6 addresses, the client is taken from the

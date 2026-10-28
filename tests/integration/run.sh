@@ -211,6 +211,7 @@ TestDestinationAddress 10.200.0.1:6667,10080
 ExitList ircnet 10.200.0.0/24:6667 192.0.2.10:6697
 ExitList web 198.51.100.7:443
 HTTPListenAddress 127.0.0.1:$http_port
+HTTPMetricsAllowFrom 127.0.0.1
 EOF
 "$tordnsel" -f "$work/tordnsel.conf" --verify-config
 "$tordnsel" -f "$work/tordnsel.conf" > "$work/tordnsel.out" 2>&1 &
@@ -282,6 +283,8 @@ check "/exit-addresses lists three exits" "3" \
   "$(http /exit-addresses | grep -c '^ExitNode')"
 check "/api/v1/exit lists exit C" '"listed":true' \
   "$(http '/api/v1/exit?ip=10.200.0.13' | grep -o '"listed":true')"
+check "/metrics: three running exits" "tordnsel_running_exits 3" \
+  "$(http /metrics | grep '^tordnsel_running_exits ')"
 check "/api/ip, direct" '{"IsTor":false,"IP":"127.0.0.1"}' "$(http /api/ip)"
 
 echo

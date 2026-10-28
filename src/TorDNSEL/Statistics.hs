@@ -19,6 +19,7 @@ module TorDNSEL.Statistics (
   , incrementBytes
   , incrementResponses
   , incrementHTTPRequests
+  , currentMetrics
   ) where
 
 import TorDNSEL.Statistics.Internals

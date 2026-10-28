@@ -105,7 +105,9 @@ instance Eq DNSConfig where
 
 -- | The response type reported in statistics. 'Positive' and 'Negative' are for
 -- valid DNSEL queries.
-data ResponseType = Positive | Negative | Other
+-- 'Limited' counts queries we didn't answer fully because of the rate
+-- limit (truncated or dropped).
+data ResponseType = Positive | Negative | Other | Limited
 
 -- | A handle to the DNS server.
 newtype DNSServer = DNSServer ThreadId
@@ -254,10 +256,12 @@ dnsUDPHandler limiter conf src msg
         Allow -> dnsHandler conf src msg
         -- A truncated response makes a real client retry over TCP, which
         -- can't be spoofed; it's no bigger than the query.
-        Slip  -> return . Just . truncateMessage $
-                   msg { msgQR = True, msgAA = False, msgRA = False
-                       , msgAD = False, msgAdditional = [] }
-        Drop  -> return Nothing
+        Slip  -> do
+          dnsRespStats conf Limited
+          return . Just . truncateMessage $
+            msg { msgQR = True, msgAA = False, msgRA = False
+                , msgAD = False, msgAdditional = [] }
+        Drop  -> dnsRespStats conf Limited >> return Nothing
 
 -- | A stateful wrapper for 'dnsResponse'.
 dnsHandler :: DNSConfig -> SockAddr -> Message -> IO (Maybe Message)

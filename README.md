@@ -73,6 +73,7 @@ The HTTP interface (enabled with `HTTPListenAddress`) serves the same data:
 | `GET /api/v1/lists` | The configured lists |
 | `GET /api/v1/me?ip=IP&port=PORT` | Type 3 query |
 | `GET /api/v1/exit?ip=IP` | "exit" query, with the relays' fingerprints |
+| `GET /metrics` | Prometheus metrics, for `HTTPMetricsAllowFrom` clients |
 | `GET /api/ip` | `{"IsTor":...,"IP":...}` like check.torproject.org |
 | `GET /torbulkexitlist[?ip=IP[&port=PORT]]` | Exit addresses, one per line |
 | `GET /exit-addresses` | Results of active exit tests |

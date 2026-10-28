@@ -125,6 +125,10 @@
 ## once. Set HTTPPublicAddress to the proxy's public address too.
 #HTTPTrustedProxy 127.0.0.1 ::1
 
+## Serve Prometheus metrics at /metrics on the HTTP interface to these
+## addresses or networks (others get 404). May be given more than once.
+#HTTPMetricsAllowFrom 127.0.0.1 ::1
+
 ################ Active testing options ###################################
 ##
 ## These options are only necessary if you want to enable active testing

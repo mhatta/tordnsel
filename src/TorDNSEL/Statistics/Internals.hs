@@ -21,6 +21,9 @@ module TorDNSEL.Statistics.Internals where
 import Prelude hiding (log)
 import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
 import Control.Concurrent.MVar (MVar, newMVar, modifyMVar_, readMVar)
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
+import qualified Data.Map as M
+import Data.Time.Clock.POSIX (POSIXTime, getPOSIXTime)
 import Control.Concurrent.QSem (QSem, newQSem, waitQSem, signalQSem)
 import qualified Control.Exception as E
 import Control.Monad (when, forever)
@@ -36,6 +39,10 @@ import System.Timeout
 import TorDNSEL.Control.Concurrent.Link
 import TorDNSEL.Control.Concurrent.Util
 import TorDNSEL.DNS.Server
+import TorDNSEL.Directory (Descriptor(..))
+import TorDNSEL.ExitList
+import TorDNSEL.NetworkState (readNetworkState)
+import TorDNSEL.NetworkState.Types
 import TorDNSEL.Log
 import TorDNSEL.Util
 
@@ -43,12 +50,17 @@ import TorDNSEL.Util
 -- sent.
 data Stats = Stats
   { bytesRecv, bytesSent, dgramsRecv, positives
-  , negatives, others, httpRequests :: !Integer }
+  , negatives, others, httpRequests, rateLimited :: !Integer }
 
 -- | The current statistics state.
 statsState :: MVar Stats
 {-# NOINLINE statsState #-}
-statsState = unsafePerformIO . newMVar $ Stats 0 0 0 0 0 0 0
+statsState = unsafePerformIO . newMVar $ Stats 0 0 0 0 0 0 0 0
+
+-- | When we started, for metrics. Set by 'startStatsServer'.
+startTimeRef :: IORef POSIXTime
+{-# NOINLINE startTimeRef #-}
+startTimeRef = unsafePerformIO $ newIORef 0
 
 -- | An internal type for messages sent to the stats server thread.
 data StatsMessage
@@ -80,6 +92,7 @@ bindStatsSocket runtimeDir =
 startStatsServer :: Socket -> IO StatsServer
 startStatsServer listenSock = do
   log Info "Starting statistics server."
+  getPOSIXTime >>= writeIORef startTimeRef
   statsChan <- newChan
   statsServerTid <- forkLinkIO $ do
     setTrapExit $ (writeChan statsChan .) . Exit
@@ -154,7 +167,8 @@ renderStats s = B.concat . map line $
   , B.pack "PositivesSent "     ~> positives
   , B.pack "NegativesSent "     ~> negatives
   , B.pack "OthersSent "        ~> others
-  , B.pack "HTTPRequests "      ~> httpRequests ]
+  , B.pack "HTTPRequests "      ~> httpRequests
+  , B.pack "RateLimited "       ~> rateLimited ]
   where
     line (x,f) = x `B.append` (B.pack . show $ f s) `B.append` B.pack "\r\n"
     (~>) = (,)
@@ -184,3 +198,67 @@ incrementResponses resp =
       Negative -> s { negatives = negatives s + 1 }
       Positive -> s { positives = positives s + 1 }
       Other    -> s { others    = others    s + 1 }
+      Limited  -> s { rateLimited = rateLimited s + 1 }
+
+-- | The current statistics and network state in the Prometheus text
+-- exposition format, for the web interface's @\/metrics@, given our version.
+currentMetrics :: String -> IO B.ByteString
+currentMetrics version = do
+  s <- readMVar statsState
+  start <- readIORef startTimeRef
+  now <- getPOSIXTime
+  ns <- readNetworkState
+  return $! renderMetrics version s start now ns
+
+-- | Render statistics and a summary of the network state as Prometheus
+-- metrics, given our version, when we started and the current time.
+renderMetrics
+  :: String -> Stats -> POSIXTime -> POSIXTime -> NetworkState -> B.ByteString
+renderMetrics version s start now ns = B.pack . unlines $ concat
+  [ metric "tordnsel_build_info" "gauge" "The version of TorDNSEL, as a label."
+      [("{version=\"" ++ version ++ "\"}", 1)]
+  , metric "tordnsel_start_time_seconds" "gauge"
+      "When TorDNSEL started, in seconds since the epoch."
+      [("", floor start)]
+  , counter "tordnsel_dns_received_bytes_total"
+      "Bytes of DNS queries received (UDP and TCP)." (bytesRecv s)
+  , counter "tordnsel_dns_sent_bytes_total"
+      "Bytes of DNS responses sent (UDP and TCP)." (bytesSent s)
+  , counter "tordnsel_dns_messages_received_total"
+      "DNS messages received (UDP and TCP)." (dgramsRecv s)
+  , metric "tordnsel_dns_responses_total" "counter"
+      "Exit list queries answered, by result; rate_limited counts UDP \
+      \queries truncated or dropped by DNSRateLimit."
+      [ ("{result=\"positive\"}", positives s)
+      , ("{result=\"negative\"}", negatives s)
+      , ("{result=\"other\"}", others s)
+      , ("{result=\"rate_limited\"}", rateLimited s) ]
+  , counter "tordnsel_http_requests_total"
+      "Requests to the web interface." (httpRequests s)
+  , metric "tordnsel_relays" "gauge"
+      "Relays we know of, and those we think are running."
+      [ ("{state=\"known\"}", fromIntegral (M.size routers))
+      , ("{state=\"running\"}", count running) ]
+  , metric "tordnsel_running_exits" "gauge"
+      "Running relays whose exit policy permits connections somewhere."
+      [("", count runningExit)]
+  , metric "tordnsel_exit_addresses" "gauge"
+      "Addresses listed as exit addresses (from descriptors and exit tests)."
+      [("", fromIntegral . length $ exitAddressesTo now ns anyDestination)]
+  , metric "tordnsel_tested_exit_addresses" "gauge"
+      "Exit addresses found by our exit tests."
+      [("", sum [ fromIntegral (M.size (tstAddresses t))
+                | r <- M.elems routers, Just t <- [rtrTestResults r] ])]
+  ]
+  where
+    routers = nsRouters ns
+    descs = [ d | r <- M.elems routers, Just d <- [rtrDescriptor r] ]
+    running d = isRunning now d
+    runningExit d = isRunning now d &&
+                    policyAcceptsDestination anyDestination (descExitPolicy d)
+    count p = fromIntegral . length $ filter p descs
+    counter name help v = metric name "counter" help [("", v)]
+    metric :: String -> String -> String -> [(String, Integer)] -> [String]
+    metric name typ help samples =
+      ("# HELP " ++ name ++ " " ++ help) : ("# TYPE " ++ name ++ " " ++ typ) :
+      [ name ++ labels ++ " " ++ show v | (labels, v) <- samples ]

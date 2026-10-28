@@ -28,6 +28,7 @@ import TorDNSEL.AddressPattern
 import TorDNSEL.ExitList
 import TorDNSEL.Fixtures
 import TorDNSEL.Util
+import TorDNSEL.Statistics.Internals (Stats(..), renderMetrics)
 import TorDNSEL.Web.Internals
 
 tests :: Test
@@ -41,7 +42,8 @@ limits = do
   bind listener (SockAddrInet 0 (htonl $ ip "127.0.0.1"))
   listen listener 32
   addr <- getSocketName listener
-  web <- startWebServer (WebConfig listener M.empty Nothing (return ()) [])
+  web <- startWebServer
+           (WebConfig listener M.empty Nothing (return ()) [] [] (return ""))
   let open1 = do
         c <- socket AF_INET Stream 0
         connect c addr
@@ -108,7 +110,8 @@ json = TestCase $
 endpoints :: IO ()
 endpoints = do
   sock <- socket AF_INET Stream 0
-  let conf = WebConfig sock lists Nothing (return ()) []
+  let conf = WebConfig sock lists Nothing (return ()) [] []
+                       (return "tordnsel_up 1\n")
       get' path client = handleRequest conf now networkState client local
         (maybe (error "bad request") id $ parseRequest $
            B.concat ["GET ", path, " HTTP/1.1"])
@@ -203,6 +206,36 @@ endpoints = do
   "10.1.9.9" @=? ipOf' (viaProxy "10.1.9.9, 10.1.2.3" proxy)
   "127.0.0.1" @=? ipOf' (viaProxy "10.0.0.99, junk" proxy)
   "2001:db8::1" @=? ipOf' (viaProxy "[2001:db8::1]" proxy)
+
+  -- /metrics: only for the configured clients; for others it doesn't exist
+  let metricsReq = Request "GET" "/metrics" [] []
+      allowed = conf { webMetricsAllowFrom = [Net4 (ip "192.0.2.0") 0xffffff00] }
+  m1 <- metricsResponse conf client metricsReq
+  404 @=? status m1
+  m2 <- metricsResponse allowed client metricsReq
+  (200, "tordnsel_up 1\n") @=? (status m2, body m2)
+  m3 <- metricsResponse allowed (SockAddrInet 40000 (htonl $ ip "198.51.100.9"))
+                        metricsReq
+  404 @=? status m3
+  -- rendered from the statistics and the network state
+  let text = renderMetrics "9.9" (Stats 10 20 3 4 5 6 7 8) 1700000000 now
+                           networkState
+      has l = (l `elem` B.lines text) @? ("missing: " ++ B.unpack l)
+  mapM_ has
+    [ "tordnsel_build_info{version=\"9.9\"} 1"
+    , "tordnsel_start_time_seconds 1700000000"
+    , "tordnsel_dns_received_bytes_total 10"
+    , "tordnsel_dns_responses_total{result=\"positive\"} 4"
+    , "tordnsel_dns_responses_total{result=\"rate_limited\"} 8"
+    , "tordnsel_http_requests_total 7"
+    -- ridB's descriptor is three days old
+    , "tordnsel_relays{state=\"known\"} 3"
+    , "tordnsel_relays{state=\"running\"} 2"
+    , "tordnsel_running_exits 2"
+    -- 10.0.0.11 and 10.0.0.99 (tested) for ridA, 10.0.0.13 for ridC
+    , "tordnsel_exit_addresses 3"
+    , "tordnsel_tested_exit_addresses 1"
+    , "# TYPE tordnsel_dns_responses_total counter" ]
   where
     lists = M.fromList
       [("examplenet", [AddrPortPattern (ip "198.51.100.0") 0xffffff00
