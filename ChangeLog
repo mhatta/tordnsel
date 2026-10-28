@@ -1,3 +1,42 @@
+0.3.0 - 2026-10-28
+  o Security (from an audit of 0.2.2):
+    - Control port: never use plain COOKIE authentication, which would send
+      the contents of whatever file the other end names; read the cookie file
+      only if it is a regular file of exactly 32 bytes; give up on the
+      handshake after 30 seconds and on QUIT after 5. Something other than
+      Tor on the control port could read files, exhaust our memory with
+      /dev/zero, or keep us from ever reconnecting.
+    - Exit tests: each cookie is accepted once, and a relay gets at most 16
+      tested exit addresses. A malicious exit could replay its test's cookie
+      from other addresses (open proxies, shared NAT) and have them listed.
+    - DNS over TCP: at most 8 connections per client network, 100 queries
+      per connection, a 2 second idle timeout when busy, and a timeout on
+      sending. One client could take all the connections.
+    - The UDP rate limiter tracks at most 100,000 networks.
+    - Web interface: at most 8 connections per client, and 3 seconds to send
+      the request.
+    - Exit test listener: a header line without a colon no longer escapes
+      the request handler as an exception.
+    - Startup: umask 077; refuse state and runtime directories writable by
+      other users; create the PID file with O_EXCL, never through a symbolic
+      link.
+    - The systemd unit has more sandboxing, including a system call filter.
+
+  o New features:
+    - "exit" queries, {IP}.{zone}, the form of the Tor Project's exit list
+      service: listed iff IP is a Tor exit, with the relays' fingerprints in
+      TXT records. Also /api/v1/exit on the web interface.
+    - DNSClientSubnet (on by default): "me" queries are about the client
+      subnet a resolver gives with the EDNS client subnet option (RFC 7871).
+    - HTTPTrustedProxy: believe X-Forwarded-For from these reverse proxies.
+    - HTTPMetricsAllowFrom: Prometheus metrics at /metrics for these clients,
+      including the number of running exits and rate-limited queries.
+
+  o Other:
+    - Root without CAP_SYS_RESOURCE (e.g. in a container) no longer fails to
+      start when it can't raise the hard limit on open files.
+    - The statistics socket also reports RateLimited.
+
 0.2.2 - 2026-10-24
   o Security:
     - Authenticate to Tor's control port with SAFECOOKIE when Tor offers it
