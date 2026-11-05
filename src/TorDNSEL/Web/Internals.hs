@@ -79,7 +79,7 @@ import qualified Data.ByteString.Char8 as B
 import Data.ByteString (ByteString)
 import Data.Char (chr, digitToInt, isHexDigit, toLower, toUpper, isDigit)
 import qualified Data.Map as M
-import Data.Maybe (isNothing, mapMaybe)
+import Data.Maybe (isJust, isNothing, mapMaybe)
 import qualified Data.Set as S
 import Data.Time.Clock.POSIX (POSIXTime, getPOSIXTime)
 import Network.Socket
@@ -165,6 +165,11 @@ startWebServer initConf = do
      \loop (!s) -> do
       message <- readMsgChan chan
       case message of
+        NewClient client _
+          -- Accepted before we were told to terminate; don't serve it.
+          | isJust (terminateReason s) -> do
+              closeSocket client `E.finally` signalQSem sem
+              loop s
         NewClient client addr
           -- One client may not take all the handlers (except a reverse proxy
           -- we trust, which speaks for many).
@@ -209,10 +214,15 @@ startWebServer initConf = do
         Terminate reason -> do
           log Info "Terminating web server."
           terminateThread Nothing (listenerTid s) (killThread $ listenerTid s)
-          pending <- drainMsgChan chan
-          sequence_ [closeSocket c | NewClient c _ <- pending]
           if M.null (handlers s)
-            then exit reason
+            then do
+              pending <- drainMsgChan chan
+              sequence_ [closeSocket c | NewClient c _ <- pending]
+              exit reason
+            -- Wait for the handlers' exit signals. They may already be
+            -- queued behind this message, so don't drain the channel: that
+            -- would lose them and leave us waiting forever. Clients queued
+            -- meanwhile are closed as their messages arrive.
             else loop s { terminateReason = Just reason }
 
         Exit t reason

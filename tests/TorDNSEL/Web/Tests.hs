@@ -21,7 +21,7 @@ import Network.Socket
   , connect, getSocketName, close )
 import qualified Network.Socket.ByteString as NSB
 import System.Timeout (timeout)
-import Test.HUnit (Test(..), (@=?), (@?))
+import Test.HUnit (Test(..), (@=?), (@?), (@?=))
 
 
 import TorDNSEL.AddressPattern
@@ -32,7 +32,8 @@ import TorDNSEL.Statistics.Internals (Stats(..), renderMetrics)
 import TorDNSEL.Web.Internals
 
 tests :: Test
-tests = TestList [requests, json, TestCase endpoints, TestCase limits]
+tests = TestList [ requests, json, TestCase endpoints, TestCase limits
+                 , TestCase terminateAfterRequest ]
 
 -- | One client can't take all the handlers, and must send its request
 -- promptly.
@@ -73,6 +74,27 @@ limits = do
   fmap (B.isPrefixOf "HTTP/1.1 200") r @=? Just True
   mapM_ close (c : ninth : silent)
   terminateWebServer Nothing web
+
+-- | The server terminates even when told to while a handler is finishing:
+-- the handler's exit signal may arrive after the request to terminate.
+terminateAfterRequest :: IO ()
+terminateAfterRequest = mapM_ (const once) [1 .. 50 :: Int]
+  where
+    once = do
+      listener <- socket AF_INET Stream 0
+      bind listener (SockAddrInet 0 (htonl $ ip "127.0.0.1"))
+      listen listener 8
+      addr <- getSocketName listener
+      web <- startWebServer
+               (WebConfig listener M.empty Nothing (return ()) [] [] (return ""))
+      c <- socket AF_INET Stream 0
+      connect c addr
+      NSB.sendAll c "GET /api/v1/lists HTTP/1.0\r\n\r\n"
+      _ <- timeout 2000000 (NSB.recv c 100)
+      close c
+      done <- timeout 5000000 (terminateWebServer Nothing web)
+      close listener
+      done @?= Just ()
 
 requests :: Test
 requests = TestList . map TestCase $
