@@ -275,7 +275,8 @@ keeps the server from being used to flood a spoofed address. At most 100,000
 client networks are tracked; while that many are, queries from other
 networks are treated as over the limit. Note that a busy
 recursive resolver sends many queries from one network, so set this well above
-what your resolvers send. TCP is not limited. (Default: 0, no limit)
+what your resolvers send. TCP and loopback (127.0.0.0/8, ::1) are not limited;
+0 turns the limit off. (Default: 100)
 
 .SH ACTIVE TESTING OPTIONS
 The following options are only necessary if active testing through Tor exits

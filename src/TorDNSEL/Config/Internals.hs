@@ -201,7 +201,7 @@ makeConfig conf =
       , "EnableActiveTesting" ~> "False"
       , "TorSocksAddress"     ~> "127.0.0.1:9050"
       , "Log"                 ~> "notice stdout"
-      , "DNSRateLimit"        ~> "0"
+      , "DNSRateLimit"        ~> "100"
       , "DNSClientSubnet"     ~> "True" ]
     (~>) = (,)
     f `app` addr = f `ap` parse (B.pack addr) conf'

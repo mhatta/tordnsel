@@ -235,6 +235,16 @@ responses = TestCase $ do
   typ "t19" Positive t19
   [A name19 ttl 0x7f000002] @=? msgAnswers r19
   (NXDomain, []) @=? (msgRCode r20, msgAnswers r20)
+
+  -- RFC 8482: ANY gets one RRset, the A record for a listed name and the
+  -- SOA at the apex, so that it can't be used to amplify a flood
+  let (t21,r21) = dnsResponse conf client (query name19 TAny) now networkState
+      (_,r22) = dnsResponse conf client
+                  (query (toName ["torhosts","example","com"]) TAny) now
+                  networkState
+  typ "t21" Positive t21
+  [A name19 ttl 0x7f000002] @=? msgAnswers r21
+  [dnsSOA conf] @=? msgAnswers r22
   where
     client = SockAddrInet 40000 (htonl $ ip "192.0.2.1")
     typ label a b = (label, show' a) @=? (label, show' b)
@@ -306,6 +316,11 @@ rateLimiting = TestCase $ do
                      , "192.0.2.2"]
   [Allow, Allow, Slip, Drop, Allow] @=? reverse ds7
   2 @=? M.size (rlBuckets rl7)
+  -- loopback can't be spoofed from outside: not limited
+  (True, True, True, False, False) @=?
+    ( isLoopback (v4 "127.0.0.1"), isLoopback (v4 "127.1.2.3")
+    , isLoopback (SockAddrInet6 53 0 (0, 0, 0, 1) 0)
+    , isLoopback (v4 "128.0.0.1"), isLoopback (v6 0) )
 
 -- | DNS over TCP on a real connection: pipelined queries are answered in
 -- order, and idle or broken connections are closed.

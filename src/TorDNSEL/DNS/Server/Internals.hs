@@ -55,7 +55,7 @@ import Data.ByteString (ByteString)
 import Data.Char (toLower, toUpper, isDigit)
 import qualified Data.List as L
 import qualified Data.Map as M
-import Data.Maybe (isJust, isNothing, maybeToList)
+import Data.Maybe (isJust, isNothing)
 import Data.Time.Clock.POSIX (POSIXTime, getPOSIXTime)
 import Data.Word (Word32)
 import Network.Socket (Socket, HostAddress, SockAddr(..), accept)
@@ -247,7 +247,8 @@ tcpBusyIdleTimeout = 2 * 1000000
 dnsUDPHandler
   :: IORef RateLimiter -> DNSConfig -> SockAddr -> Message -> IO (Maybe Message)
 dnsUDPHandler limiter conf src msg
-  | dnsRateLimit conf <= 0 || msgQR msg = dnsHandler conf src msg
+  | dnsRateLimit conf <= 0 || msgQR msg || isLoopback src =
+      dnsHandler conf src msg
   | otherwise = do
       now <- getPOSIXTime
       decision <- atomicModifyIORef' limiter $ \rl ->
@@ -308,8 +309,9 @@ dnsResponse c src msg now ns = withEDNS $ case () of
         TNS  -> (Other, noErr { msgAnswers = [dnsNS c], msgAuthority = [] })
         TSOA -> (Other, noErr { msgAnswers = [dnsSOA c]
                               , msgAuthority = [dnsNS c] })
-        TAny -> (Other, noErr { msgAnswers = [dnsSOA c, dnsNS c] ++
-                                maybeToList (dnsA c)
+        -- RFC 8482: answer ANY with one RRset, not all of them, so that
+        -- ANY queries can't be used to amplify a flood.
+        TAny -> (Other, noErr { msgAnswers = [dnsSOA c]
                               , msgAuthority = [dnsNS c] })
         _    -> (Other, emptyAnswer soa)
     | Just qLabels <- mbQLabels -> case parseExitListQuery (dnsLists c) qLabels of
@@ -367,7 +369,9 @@ dnsResponse c src msg now ns = withEDNS $ case () of
       where
         records = [ (TA,   A name (ttlFor q) testAddress)
                   , (TTXT, TXT name (ttlFor q) (txtFor q)) ]
-        wanted t = qt == TAny || qt == t
+        -- RFC 8482: ANY gets the A record alone, which is what a DNSBL
+        -- client wants; the TXT record (fingerprints) can be large.
+        wanted t = qt == t || (qt == TAny && t == TA)
 
     -- Like the Tor Project's service, "exit" queries are explained by the
     -- fingerprints of the exits (upper case hex).
@@ -649,6 +653,15 @@ rateLimitWith maxBuckets rate now src (RateLimiter buckets lastPurge overflow)
           (M.filter (\b -> not (full (refill now b))) buckets, now)
       | otherwise = (buckets, lastPurge)
     full (Bucket k _ _) = k >= rate'
+
+-- | Queries over loopback can't be spoofed from outside the host (the kernel
+-- drops such packets), and often come from a local resolver serving many
+-- clients: don't rate limit them.
+isLoopback :: SockAddr -> Bool
+isLoopback (SockAddrInet _ addr) = ntohl addr .&. 0xff000000 == 0x7f000000
+isLoopback (SockAddrInet6 _ _ (0, 0, 0, 1) _) = True
+isLoopback (SockAddrInet6 _ _ (0, 0, 0xffff, a) _) = a .&. 0xff000000 == 0x7f000000
+isLoopback _ = False
 
 -- | The client network an address belongs to.
 rateKey :: SockAddr -> RateKey
