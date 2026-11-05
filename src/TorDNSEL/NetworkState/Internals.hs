@@ -580,7 +580,9 @@ startTorController net conf mbDelay = liftIO $ do
     delay = fromMaybe minDelay mbDelay
     backoffFactor = 2
     minDelay = 3
-    maxDelay = 300
+    -- Tor is restarted now and then (on upgrades, say); reconnecting to a
+    -- local Tor is cheap, so don't wait long to try again.
+    maxDelay = 60
     handshakeTimeout = 30 * 10^(6 :: Int)
 
 --------------------------------------------------------------------------------
