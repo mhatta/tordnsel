@@ -19,6 +19,7 @@ import qualified Data.ByteString.Char8 as B
 import Data.Conduit (runConduit, (.|))
 import qualified Data.Conduit.List as CL
 import Data.IORef (newIORef, readIORef, writeIORef)
+import qualified Data.List as L
 import qualified Data.Map as M
 import qualified Data.Set as S
 import Data.Time (hoursToTimeZone)
@@ -50,7 +51,11 @@ import TorDNSEL.ExitTest.Server.Internals
 import TorDNSEL.Fixtures
 import TorDNSEL.NetworkState.Internals
   ( newConsensus, exitMappingName, takeCookie, acceptTestedAddress
-  , maxTestedAddresses )
+  , maxTestedAddresses, mergeExitAddrsWithNetState )
+import TorDNSEL.NetworkState.Storage.Internals
+  ( ExitAddress(..), renderExitAddress, readExitAddresses, replaceExitAddresses
+  , storePath )
+import System.Directory (createDirectory, removeDirectoryRecursive)
 import TorDNSEL.NetworkState.Types
 import TorDNSEL.TorControl.Internals
 import TorDNSEL.Util (encodeBase16, htonl, Port(..))
@@ -201,6 +206,31 @@ exitTestCookies = TestCase $ do
   acceptTestedAddress (router (maxTestedAddresses - 1)) 1000 @? "room refused"
   not (acceptTestedAddress (router maxTestedAddresses) 1000) @? "over the cap"
   acceptTestedAddress (router maxTestedAddresses) 1 @? "known address refused"
+  -- stored results with more addresses than that (written before the limit,
+  -- say) are cut down to the most recent when loaded
+  let rid = ridA
+      stored = ExitAddress rid t t (M.fromList
+                 [ (fromIntegral a, posixSecondsToUTCTime (fromIntegral a))
+                 | a <- [1 .. 3 * maxTestedAddresses] ])
+      loaded = mergeExitAddrsWithNetState [stored] emptyNetworkState
+      kept = maybe [] (M.keys . tstAddresses) $
+               rtrTestResults =<< M.lookup rid (nsRouters loaded)
+  [fromIntegral a | a <- [2 * maxTestedAddresses + 1 .. 3 * maxTestedAddresses]]
+    @=? kept
+  kept @=? M.keys (nsAddrs loaded)
+  -- the store is written to disk and read back, even out of order
+  tmp <- getTemporaryDirectory
+  (dirFile, hd) <- openBinaryTempFile tmp "state"
+  hClose hd >> removeFile dirFile >> createDirectory dirFile
+  _ <- replaceExitAddresses dirFile (nsRouters loaded)
+  [ea] <- readExitAddresses dirFile
+  (eaRouterID ea, M.keys (eaAddresses ea)) @=? (rid, kept)
+  let one r a = ExitAddress r t t (M.singleton a t)
+  B.writeFile (dirFile ++ storePath) . B.concat . map renderExitAddress $
+    [one ridC 3, one ridA 1, one ridB 2]
+  back <- readExitAddresses dirFile
+  L.sort [ridA, ridB, ridC] @=? map eaRouterID back
+  removeDirectoryRecursive dirFile
 
 -- | One host can't take all the exit test listener's handlers: past the
 -- limit, its connections are closed at once, and other hosts (exits) are

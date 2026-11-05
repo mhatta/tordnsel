@@ -35,7 +35,10 @@ import Data.Maybe (mapMaybe, catMaybes)
 import Data.Time (UTCTime)
 import Network.Socket (HostAddress)
 import System.Directory (renameFile)
-import System.IO (Handle, openFile, hFlush, hClose, IOMode(AppendMode))
+import System.IO
+  (Handle, openFile, hFlush, hClose, IOMode(AppendMode, WriteMode))
+import System.Posix.IO (handleToFd, closeFd)
+import System.Posix.Unistd (fileSynchronise)
 import System.IO.Error (isDoesNotExistError)
 import System.Posix.Files (getFileStatus, fileSize)
 
@@ -236,7 +239,7 @@ readExitAddresses :: FilePath -> IO [ExitAddress]
 readExitAddresses stateDir =
   M.elems `fmap` liftM2 (M.unionWith merge)
                         (M.fromListWith merge `fmap` parseFile journalPath)
-                        (M.fromDistinctAscList `fmap` parseFile storePath)
+                        (M.fromListWith merge `fmap` parseFile storePath)
   where
     merge new old = new { eaAddresses = (M.union `on` eaAddresses) new old }
     parseFile fp = do
@@ -256,7 +259,11 @@ readExitAddresses stateDir =
 -- Return the new exit-addresses file's size in bytes.
 replaceExitAddresses :: FilePath -> Map RouterID Router -> IO Integer
 replaceExitAddresses stateDir routers = do
-  L.writeFile (stateDir ++ tempStorePath) (L.fromChunks $ addrs routers)
+  -- Make sure the new file is on disk before it replaces the old one, or a
+  -- crash could leave us with an empty file and no test results.
+  h <- openFile (stateDir ++ tempStorePath) WriteMode
+  (L.hPut h (L.fromChunks $ addrs routers) >> handleToFd h) `E.onException` hClose h
+    >>= \fd -> fileSynchronise fd `E.finally` closeFd fd
   renameFile (stateDir ++ tempStorePath) (stateDir ++ storePath)
   writeFile (stateDir ++ journalPath) ""
   (toInteger . fileSize) `fmap` getFileStatus (stateDir ++ storePath)

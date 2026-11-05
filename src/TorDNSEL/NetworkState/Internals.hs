@@ -53,6 +53,7 @@ module TorDNSEL.NetworkState.Internals (
   , acceptTestedAddress
   , takeCookie
   , maxTestedAddresses
+  , keepLatestAddresses
   , newDescriptor
   , newRouterStatus
   , newConsensus
@@ -74,6 +75,7 @@ import qualified Control.Exception as E
 import qualified Data.ByteString.Char8 as B
 import Data.ByteString.Char8 (ByteString)
 import qualified Data.List as L
+import Data.Ord (comparing, Down(..))
 import Data.Maybe
 import qualified Data.Map as M
 import Data.Map (Map)
@@ -653,19 +655,31 @@ terminateExitTests testState = do
 mergeExitAddrsWithNetState :: [ExitAddress] -> NetworkState -> NetworkState
 mergeExitAddrsWithNetState = flip $ L.foldl' mergeAddr where
   mergeAddr (NetworkState addrs rtrs) (ExitAddress rid pub status exits) =
-    NetworkState (L.foldl' insertAddr addrs $ M.keys exits)
-                 (alter' updateRouter rid rtrs)
+    NetworkState addrs' (M.insert rid router' rtrs)
     where
-      insertAddr addrs' addr = insertAddress addr rid addrs'
-      updateRouter Nothing  = Just initialRouter
-      updateRouter (Just r) =
-        Just r { rtrTestResults = mergeTestResults (rtrTestResults r) }
-      mergeTestResults Nothing    = Just $! initialTestResults
-      mergeTestResults (Just old) =
-        Just $! TestResults (pub `max` tstPublished old)
-                            (M.unionWith max (tstAddresses old) exits)
-      initialRouter = Router Nothing (Just $! initialTestResults) False status
-      initialTestResults = TestResults pub exits
+      old = M.lookup rid rtrs
+      oldTests = old >>= rtrTestResults
+      oldExits = maybe M.empty tstAddresses oldTests
+      -- The file may hold more addresses than we'd accept now (written by a
+      -- version without the limit, say): keep the most recently seen.
+      exits' = keepLatestAddresses maxTestedAddresses
+                 (M.unionWith max oldExits exits)
+      dropped = M.keys (oldExits `M.difference` exits')
+      listenAddr = descListenAddr `fmap` (rtrDescriptor =<< old)
+      addrs' = flip (L.foldl' (\as a -> insertAddress a rid as)) (M.keys exits') $
+               L.foldl' (\as a -> deleteAddress a rid as) addrs
+                        (filter ((/= listenAddr) . Just) dropped)
+      tests' = TestResults (maybe pub (max pub . tstPublished) oldTests) exits'
+      router' = case old of
+        Nothing -> Router Nothing (Just $! tests') False status
+        Just r  -> r { rtrTestResults = Just $! tests' }
+
+-- | Keep the @n@ addresses seen most recently.
+keepLatestAddresses :: Int -> Map HostAddress UTCTime -> Map HostAddress UTCTime
+keepLatestAddresses n m
+  | M.size m <= n = m
+  | otherwise     = M.fromList . take n . L.sortBy (comparing (Down . snd)) $
+                      M.toList m
 
 -- | Look up a cookie and forget it. A cookie is good for one connection: it
 -- travels in the clear through the exit, so the exit could otherwise send it
