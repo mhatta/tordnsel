@@ -70,7 +70,9 @@ instance Eq ExitTestServerConfig where
 data ServerState = ServerState
   { serverChan      :: !(MsgChan ServerMessage)
   , handlerSem      :: !QSemN
-  , handlers        :: !(Set ThreadId)
+  , handlers        :: !(Map ThreadId HostAddress)
+    -- | How many handlers are serving each client address.
+  , perClient       :: !(Map HostAddress Int)
   , listenerThreads :: !(Map ThreadId Listener)
   , deadListeners   :: !(Set ThreadId) }
 
@@ -122,11 +124,17 @@ startExitTestServer socks initConf = do
 
     let initConf' = initConf { etscfListenAddrs =
                                  S.fromList $ map (listenAddr . snd) listeners }
-        initState = ServerState chan sem S.empty (M.fromList listeners) S.empty
+        initState = ServerState chan sem M.empty M.empty (M.fromList listeners)
+                                S.empty
     fix (\loop (!conf,!s) -> readMsgChan chan >>= handleMessage conf s >>= loop)
         (initConf', initState)
 
   return $ ExitTestServer (writeMsgChan chan) tid
+
+-- | How many exit test connections one address may have open at once. A host
+-- may run several exits, each tested on several ports at once.
+maxTestClientsPerAddress :: Int
+maxTestClientsPerAddress = 16
 
 -- | Start a listener thread, returning its 'ThreadId'.
 startListenerThread :: (Socket -> HostAddress -> IO ()) -> QSemN -> SocketOwner
@@ -175,7 +183,15 @@ reopenSocketIfClosed addr mbSock = MaybeT $ do
 -- current config and state.
 handleMessage :: ExitTestServerConfig -> ServerState -> ServerMessage
               -> IO (ExitTestServerConfig, ServerState)
-handleMessage conf s (NewClient sock addr) = do
+handleMessage conf s (NewClient sock addr)
+  -- Anyone can connect here. One host may not take all the handlers, which
+  -- would stop our exit tests (the exits connecting to us).
+  | M.findWithDefault 0 addr (perClient s) >= maxTestClientsPerAddress = do
+      log Debug "Exit test client " (inet_htoa addr)
+                " has too many connections; closing."
+      closeSocket sock `E.finally` signalQSemN (handlerSem s) 1
+      return (conf, s)
+  | otherwise = do
   tid <- forkLinkIO . (`E.finally` signalQSemN (handlerSem s) 1) .
     E.bracket (socketToHandle sock ReadWriteMode) hClose $ \client -> do
       -- Anyone can connect here: whatever goes wrong with a request (short of
@@ -189,8 +205,8 @@ handleMessage conf s (NewClient sock addr) = do
             B.hPut client $ B.pack "HTTP/1.0 204 No Content\r\n\
                                    \Connection: close\r\n\r\n"
           _ -> do
-            log Info "Received invalid HTTP request from " (inet_htoa addr)
-                     "; discarding."
+            log Debug "Received invalid HTTP request from " (inet_htoa addr)
+                      "; discarding."
             B.hPut client $ B.pack "HTTP/1.0 400 Bad Request\r\n\
                                    \Connection: close\r\n\r\n"
       case r of
@@ -198,13 +214,16 @@ handleMessage conf s (NewClient sock addr) = do
           let msg | Just e' <- E.fromException e, isEOFError e'
                   = "Connection closed by other side"
                   | otherwise = show e
-          log Info "Error reading HTTP request from " (inet_htoa addr) ": " msg
-        Nothing -> log Info "Reading HTTP request from " (inet_htoa addr)
-                            " timed out."
+          log Debug "Error reading HTTP request from " (inet_htoa addr) ": "
+                    msg
+        Nothing -> log Debug "Reading HTTP request from " (inet_htoa addr)
+                             " timed out."
         _ -> return ()
-  return (conf, s { handlers = S.insert tid (handlers s) })
+  return (conf, s { handlers = M.insert tid addr (handlers s)
+                  , perClient = M.insertWith (+) addr 1 (perClient s) })
   where
-    readTimeout = 30 * 10^6
+    -- An exit sends its test request as soon as it has connected.
+    readTimeout = 15 * 10^6
 
 handleMessage conf s (Reconfigure reconf signal) = do
   when (conf /= newConf) $
@@ -247,17 +266,21 @@ handleMessage _conf s (Terminate reason) = do
   mapM_ (\tid -> terminateThread Nothing tid (killThread tid))
         (M.keys $ listenerThreads s)
   F.mapM_ (\tid -> terminateThread Nothing tid (killThread tid))
-          (handlers s)
+          (M.keys $ handlers s)
   msgs <- drainMsgChan $ serverChan s
   sequence_ [closeSocket client | NewClient client _ <- msgs]
   exit reason
 
 handleMessage conf s (Exit tid reason)
-  | tid `S.member` handlers s = do
+  | Just addr <- M.lookup tid (handlers s) = do
     case reason of
-        AbnormalExit _ -> log Warn "Bug: An exit test client handler exited abnormally: "
+        AbnormalExit _ -> log Warn "Bug: An exit test client handler exited \
+                                   \abnormally: " reason
         NormalExit     -> return ()
-    return (conf, s { handlers = S.delete tid (handlers s) })
+    return (conf, s { handlers = M.delete tid (handlers s)
+                    , perClient = M.update (\n -> if n <= 1 then Nothing
+                                                          else Just (n - 1))
+                                           addr (perClient s) })
   | tid `S.member` deadListeners s =
     return (conf, s { deadListeners = S.delete tid (deadListeners s) })
   | Just (Listener addr sock owner) <- tid `M.lookup` listenerThreads s = do

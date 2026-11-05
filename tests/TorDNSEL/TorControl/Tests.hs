@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings  #-}
+{-# LANGUAGE OverloadedStrings, ScopedTypeVariables #-}
 -----------------------------------------------------------------------------
 -- |
 -- Module      : TorDNSEL.TorControl.Tests
@@ -24,7 +24,11 @@ import qualified Data.Set as S
 import Data.Time (hoursToTimeZone)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import Network.Socket
-  (socketPair, Family(AF_UNIX), SocketType(Stream), socketToHandle)
+  ( socketPair, Family(AF_UNIX, AF_INET), SocketType(Stream), socketToHandle
+  , socket, bind, listen, connect, close, getSocketName, SockAddr(..)
+  , defaultProtocol )
+import qualified Network.Socket.ByteString as NSB
+import Control.Concurrent (threadDelay)
 import System.Directory (getTemporaryDirectory, removeFile)
 import System.IO
   (IOMode(ReadWriteMode), hClose, hFlush, openBinaryTempFile, hSetBuffering,
@@ -39,18 +43,21 @@ import TorDNSEL.Files
   (readSmallRegularFile, createFileExclusively, isGroupOrWorldWritable)
 
 import TorDNSEL.Directory.Internals
-import TorDNSEL.ExitTest.Request (Cookie(..))
+import TorDNSEL.ExitTest.Request (Cookie(..), createRequest)
+import TorDNSEL.ExitTest.Server.Internals
+  ( startExitTestServer, terminateExitTestServer, ExitTestServerConfig(..)
+  , maxTestClientsPerAddress )
 import TorDNSEL.Fixtures
 import TorDNSEL.NetworkState.Internals
   ( newConsensus, exitMappingName, takeCookie, acceptTestedAddress
   , maxTestedAddresses )
 import TorDNSEL.NetworkState.Types
 import TorDNSEL.TorControl.Internals
-import TorDNSEL.Util (encodeBase16)
+import TorDNSEL.Util (encodeBase16, htonl, Port(..))
 
 tests :: Test
 tests = TestList [ protocolInfo', safeCookie, authChallenge, cookieFiles
-                 , fakeTor, exitTestCookies, addressMap
+                 , fakeTor, exitTestCookies, exitTestListener, addressMap
                  , replies, consensusEvent, consensus, mapping ]
 
 -- | The PROTOCOLINFO reply of Tor 0.4.9.6 with cookie authentication.
@@ -194,6 +201,42 @@ exitTestCookies = TestCase $ do
   acceptTestedAddress (router (maxTestedAddresses - 1)) 1000 @? "room refused"
   not (acceptTestedAddress (router maxTestedAddresses) 1000) @? "over the cap"
   acceptTestedAddress (router maxTestedAddresses) 1 @? "known address refused"
+
+-- | One host can't take all the exit test listener's handlers: past the
+-- limit, its connections are closed at once, and other hosts (exits) are
+-- still served.
+exitTestListener :: Test
+exitTestListener = TestCase $ do
+  listener <- socket AF_INET Stream defaultProtocol
+  bind listener (SockAddrInet 0 (htonl 0x7f000001))
+  listen listener 64
+  addr <- getSocketName listener
+  got <- newEmptyMVar
+  server <- startExitTestServer [(addr, Just listener)] ExitTestServerConfig
+    { etscfNotifyNewExitAddress = \_ cookie a -> putMVar got (cookie, a)
+    , etscfConcClientLimit      = 100
+    , etscfListenAddrs          = S.singleton addr }
+  let from src = do
+        c <- socket AF_INET Stream defaultProtocol
+        bind c (SockAddrInet 0 (htonl src))
+        connect c addr
+        return c
+  silent <- mapM (const $ from 0x7f000001) [1 .. maxTestClientsPerAddress]
+  threadDelay 100000
+  extra <- from 0x7f000001
+  closed <- timeout 1000000 (E.try (NSB.recv extra 1))
+  case closed of
+    Just (Right "")                   -> return ()
+    Just (Left (_ :: E.IOException))  -> return ()
+    _ -> assertFailure "connection over the limit kept open"
+  -- another address is still served
+  let cookie = Cookie (B.replicate 32 'k')
+  other <- from 0x7f000002
+  NSB.sendAll other (createRequest "127.0.0.1" (Port 80) cookie)
+  r <- timeout 2000000 (takeMVar got)
+  Just (cookie, 0x7f000002) @=? r
+  mapM_ close (extra : other : silent)
+  terminateExitTestServer Nothing server
 
 -- | Parsing Tor's reply to AUTHCHALLENGE.
 authChallenge :: Test
