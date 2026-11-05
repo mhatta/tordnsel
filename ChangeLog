@@ -1,3 +1,46 @@
+0.4.0 - 2026-11-05
+  o Security (from an audit of 0.3.0):
+    - Dropping privileges: without Group, use the user's primary group
+      instead of keeping group 0; set the supplementary groups to the
+      user's (as initgroups(3) does) instead of keeping root's.
+    - Exit test listener: at most 16 connections from one address, and 15
+      seconds (not 30) to send the request. One host could take all the
+      handlers and stop the exit tests. Bad requests are logged at debug
+      level.
+    - DNS: DNSRateLimit is now 100 by default (it was off), loopback is
+      never limited, and ANY gets a single RRset (RFC 8482): the A record
+      for a listed name, the SOA at the apex. A public server could be used
+      to amplify spoofed floods.
+    - Exit test results loaded from the state directory are cut down to the
+      16 most recent addresses per relay, like new ones.
+    - The statistics socket is mode 0660 (it was 0666), owned by the user
+      and group we drop privileges to.
+
+  o Tor:
+    - TorControlAddress and TorSocksAddress accept Unix sockets,
+      unix:/path, and IPv6 addresses, which failed to connect before.
+      Debian's tor package works without changes to the torrc:
+        TorControlAddress unix:/run/tor/control
+        TorSocksAddress unix:/run/tor/socks
+      with TorDNSEL in the debian-tor group.
+    - Retry the control connection at least once a minute (it was every 5
+      minutes at worst), so that a restarted Tor is noticed quickly.
+
+  o Other:
+    - The exit-addresses file is synced to disk before it replaces the old
+      one, and is read correctly even if it isn't sorted.
+
+  o Upgrading:
+    - With DNSRateLimit unset, UDP is now limited to 100 queries a second
+      per client network; set it to 0 for the old behaviour.
+    - The statistics socket is no longer world-accessible; run whatever
+      reads it (contrib/cacti-input.pl) as TorDNSEL's user or group.
+
+0.3.1 - 2026-11-05
+  o Web interface: terminating the web server (at shutdown, say) could hang
+    forever if a request had just been served: the handler's exit signal
+    was thrown away.
+
 0.3.0 - 2026-10-28
   o Security (from an audit of 0.2.2):
     - Control port: never use plain COOKIE authentication, which would send

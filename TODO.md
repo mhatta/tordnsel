@@ -31,6 +31,14 @@ See [ChangeLog](ChangeLog).
 - [x] fixes for the problems found in an audit of 0.2.2 (control port,
   exit test cookies, connection limits, file handling)
 
+## Done in 0.4.0
+
+- [x] Tor's control and SOCKS ports over Unix sockets (as Debian's tor
+  offers them) and IPv6
+- [x] fixes for the problems found in an audit of 0.3.0 (privilege dropping,
+  exit test listener limits, DNS amplification, stored test results,
+  statistics socket)
+
 ## Still to do
 
 - [ ] IPv6
@@ -40,5 +48,5 @@ See [ChangeLog](ChangeLog).
   - [ ] "me" queries and `/api/ip` from IPv6 hosts
 - [ ] persist the network state (not only exit test results) across restarts,
   so that answers are available before Tor has delivered all descriptors
-- [ ] Debian packaging
+- [ ] Debian packaging (ITP filed; packaging on Salsa, debian/tordnsel)
 - [ ] don't trust the local running environment to be sane or safe
