@@ -31,7 +31,9 @@ import Control.Monad.Fix (fix)
 import qualified Data.ByteString.Char8 as B
 import Data.Maybe
 import qualified Data.Set as S
-import Network.Socket (accept, socketToHandle, Socket)
+import Network.Socket (accept, socketToHandle, Socket, close)
+import System.Posix.Files (setOwnerAndGroup)
+import System.Posix.Types (UserID, GroupID)
 import System.IO (hClose, IOMode(ReadWriteMode))
 import System.IO.Unsafe (unsafePerformIO)
 import System.Timeout
@@ -81,10 +83,16 @@ data StatsState = StatsState
   , terminateReason :: !(Maybe ExitReason) }
 
 -- | Given the runtime directory, bind and return the listening statistics
--- socket.
-bindStatsSocket :: FilePath -> IO Socket
-bindStatsSocket runtimeDir =
-  bindListeningUnixDomainStreamSocket (statsSocketPath runtimeDir) 0o666
+-- socket. Only its owner and group may connect: give it the user and group
+-- we'll run as, if we drop privileges.
+bindStatsSocket :: FilePath -> Maybe UserID -> Maybe GroupID -> IO Socket
+bindStatsSocket runtimeDir mbUid mbGid =
+  E.bracketOnError (bindListeningUnixDomainStreamSocket path 0o660) close $
+    \sock -> do
+      when (isJust mbUid || isJust mbGid) $
+        setOwnerAndGroup path (fromMaybe (-1) mbUid) (fromMaybe (-1) mbGid)
+      return sock
+  where path = statsSocketPath runtimeDir
 
 -- | Given a listening socket, start a server offering access to load statistics
 -- through a Unix domain stream socket in our runtime directory. Link the server

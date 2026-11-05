@@ -272,7 +272,7 @@ main = do
     (exitPrint Can'tCreate . cat "Preparing runtime directory failed: ")
 
   statsSock <- catchIO
-    (bindStatsSocket $ cfRuntimeDirectory conf)
+    (bindStatsSocket (cfRuntimeDirectory conf) (privUser ids) (privGroup ids))
     (exitPrint Can'tCreate . cat "Opening statistics listener failed: ")
 
   reconfigSock <- catchIO

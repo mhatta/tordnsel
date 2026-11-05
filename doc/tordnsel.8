@@ -340,8 +340,10 @@ a new exit-addresses file.
 .TP
 \fIRuntimeDirectory\fR\fB/statistics.socket\fP
 A Unix domain stream socket that dumps cumulative load information when it
-accepts a client connection. See contrib/cacti-input.pl in the TorDNSEL source
-distribution for an example of using it.
+accepts a client connection. Only its owner and group (those of \fBUser\fR and
+\fBGroup\fR, or of the user running \fBtordnsel\fR) may connect to it. See
+contrib/cacti-input.pl in the TorDNSEL source distribution for an example of
+using it.
 .TP
 \fIRuntimeDirectory\fR\fB/reconfigure.socket\fP
 A Unix domain stream socket that accepts a new configuration file and
