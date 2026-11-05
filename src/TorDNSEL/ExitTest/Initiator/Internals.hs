@@ -70,9 +70,7 @@ import qualified Data.Set as Set
 import Data.Set (Set)
 import Data.Time (UTCTime, NominalDiffTime, getCurrentTime, addUTCTime)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
-import Network.Socket
-  ( HostAddress, SockAddr, Family(AF_INET), SocketType(Stream)
-  , socket, connect, socketToHandle )
+import Network.Socket (HostAddress, SockAddr, socketToHandle)
 import System.IO (hClose, IOMode(ReadWriteMode))
 import System.Timeout
 
@@ -400,8 +398,8 @@ forkTestClient conf rid published port =
     testHost = B.pack . inet_htoa . eticfTestAddress $ conf
 
     connectToSocksServer =
-      E.bracketOnError (socket AF_INET Stream tcpProtoNum) closeSocket $ \sock -> do
-        connect sock (eticfSocksServer conf)
+      E.bracketOnError (connectStreamSocket $ eticfSocksServer conf)
+                       closeSocket $ \sock ->
         socketToHandle sock ReadWriteMode
 
     connectionTimeout = 120 * 10^6

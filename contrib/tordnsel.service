@@ -13,7 +13,11 @@
 #
 # To authenticate to Tor with its cookie, make the cookie group-readable
 # (CookieAuthFileGroupReadable 1 in the torrc) and add Tor's group below,
-# e.g. SupplementaryGroups=debian-tor on Debian.
+# e.g. SupplementaryGroups=debian-tor on Debian. The same group lets TorDNSEL
+# use Debian's tor control and SOCKS sockets:
+#
+#   TorControlAddress unix:/run/tor/control
+#   TorSocksAddress unix:/run/tor/socks
 
 [Unit]
 Description=TorDNSEL, a DNS-based list of Tor exit nodes

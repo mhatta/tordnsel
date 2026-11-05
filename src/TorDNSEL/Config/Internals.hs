@@ -169,8 +169,8 @@ makeConfig :: MonadError ShowS m => ConfigMap -> m Config
 makeConfig conf =
   return Config `app`
     "StateDirectory" `app`
-    "RuntimeDirectory" `app`
-    "DNSListenAddress" `app`
+    "RuntimeDirectory" `ap`
+    listenAddress "DNSListenAddress" `app`
     "TorControlAddress" `app`
     "TorSocksAddress" `app`
     "ZoneOfAuthority" `app`
@@ -186,8 +186,9 @@ makeConfig conf =
     "Group" `app`
     "ChangeRootDirectory" `app`
     "PIDFile" `app`
-    "ExitList" `app`
-    "HTTPListenAddress" `app`
+    "ExitList" `ap`
+    (parse (B.pack "HTTPListenAddress") conf' >>=
+       maybe (return Nothing) (fmap Just . checkInet "HTTPListenAddress")) `app`
     "HTTPPublicAddress" `ap`
     rateLimit `app`
     "HTTPTrustedProxy" `app`
@@ -205,6 +206,12 @@ makeConfig conf =
       , "DNSClientSubnet"     ~> "True" ]
     (~>) = (,)
     f `app` addr = f `ap` parse (B.pack addr) conf'
+    -- We listen for DNS and HTTP on IP addresses only.
+    listenAddress item = parse (B.pack item) conf' >>= checkInet item
+    checkInet item a@(SockAddrUnix _) = throwError $
+      cat "Parsing \"" item "\" failed: " (show a)
+          " is a Unix socket; an IP address and port are needed."
+    checkInet _ a = return a
     rateLimit = do
       r <- parse (B.pack "DNSRateLimit") conf'
       if r < 0
@@ -297,6 +304,14 @@ instance ConfigValue SockAddr where
     val <- lookupValue item conf
     prependOnFail item $
       case B.split ':' val of
+        -- A Unix domain socket, written as Tor writes them, e.g.
+        -- unix:/run/tor/control
+        _ | Just path <- B.stripPrefix (B.pack "unix:") val ->
+              if B.pack "/" `B.isPrefixOf` path && B.length path < 108
+                then return $! SockAddrUnix (B.unpack path)
+                else throwError $ cat "Malformed Unix socket path "
+                                      (esc maxAddrLen path) "; it must be \
+                                      \absolute and shorter than 108 bytes."
         [addr,port] -> do
           addr' <- inet_atoh addr
           Port port' <- parsePort port

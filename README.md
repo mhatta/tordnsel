@@ -121,6 +121,20 @@ CookieAuthentication 1
 SocksPort 9050
 ```
 
+The control port and the SOCKS port may also be Unix sockets
+(`ControlSocket`, `SocksPort unix:`); TorDNSEL connects to them with
+`TorControlAddress unix:/path` and `TorSocksAddress unix:/path`. Debian's
+tor package offers both, readable by the `debian-tor` group, so with it no
+change to the torrc is needed:
+
+```
+TorControlAddress unix:/run/tor/control
+TorSocksAddress unix:/run/tor/socks
+```
+
+and run TorDNSEL in the `debian-tor` group (`SupplementaryGroups=debian-tor`
+in the systemd unit).
+
 The cookie file must be readable by the TorDNSEL user (or use
 `HashedControlPassword` with TorDNSEL's `TorControlPassword`). TorDNSEL
 authenticates with SAFECOOKIE, never sending the cookie itself, and refuses

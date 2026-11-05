@@ -75,6 +75,7 @@ module TorDNSEL.Util (
   , bindUDPSocket
   , bindListeningTCPSocket
   , bindListeningUnixDomainStreamSocket
+  , connectStreamSocket
 
   -- * Monads
   , MaybeT(..)
@@ -135,7 +136,7 @@ import Data.Word (Word16, Word32)
 import Network.Socket
   ( HostAddress, HostAddress6, ProtocolNumber, Socket, SockAddr(..), SocketOption(ReuseAddr, IPv6Only)
   , SocketType(Datagram, Stream), Family(AF_INET, AF_INET6, AF_UNIX), socket, bind
-  , listen, setSocketOption, close, maxListenQueue )
+  , listen, setSocketOption, close, maxListenQueue, connect, defaultProtocol )
 import System.Directory (doesFileExist, removeFile)
 import System.Environment (getProgName)
 import System.Exit (exitWith, ExitCode)
@@ -552,6 +553,14 @@ bindListeningUnixDomainStreamSocket sockPath mode = do
     setFileMode sockPath mode
     listen sock maxListenQueue
     return sock
+
+-- | Open a stream socket connected to the given address: TCP over IPv4 or
+-- IPv6, or a Unix domain socket (as Tor's ControlSocket and @SocksPort
+-- unix:@ offer).
+connectStreamSocket :: SockAddr -> IO Socket
+connectStreamSocket addr =
+  E.bracketOnError (socket (sockAddrFamily addr) Stream defaultProtocol) close $
+    \sock -> connect sock addr >> return sock
 
 -- | The address family of a 'SockAddr'.
 sockAddrFamily :: SockAddr -> Family

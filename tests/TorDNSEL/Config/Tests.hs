@@ -19,6 +19,7 @@ import Control.Arrow ((***))
 import Data.Char (toLower)
 import qualified Data.ByteString.Char8 as B
 import qualified Data.Map as M
+import Network.Socket (SockAddr(..))
 import Test.HUnit (Test(..), (@=?))
 
 import TorDNSEL.Config.Internals
@@ -32,7 +33,23 @@ tests = TestList . map TestCase $
   , [107, 113] @=? supplementaryGroups "tordnsel" 107
       [(0, ["root"]), (113, ["tordnsel", "other"]), (107, ["tordnsel"])
       , (27, ["other"])]
-  , [107] @=? supplementaryGroups "tordnsel" 107 [(0, ["root"])] ]
+  , [107] @=? supplementaryGroups "tordnsel" 107 [(0, ["root"])]
+  -- Tor's control and SOCKS ports may be Unix sockets (as with Debian's
+  -- tor) or IPv6; we listen on IP addresses only
+  , Just (SockAddrUnix "/run/tor/control", SockAddrUnix "/run/tor/socks")
+      @=? fmap (\c -> (cfTorControlAddress c, cfTorSocksAddress c))
+               (hush . makeConfig $ M.union (toConfig
+                  [ "TorControlAddress" ~> "unix:/run/tor/control"
+                  , "TorSocksAddress"   ~> "unix:/run/tor/socks" ]) config)
+  , Just (SockAddrInet6 9051 0 (0, 0, 0, 1) 0)
+      @=? fmap cfTorControlAddress (hush . makeConfig $
+            M.insert "torcontroladdress" "[::1]:9051" config)
+  , Nothing @=? fmap cfTorControlAddress (hush . makeConfig $
+                  M.insert "torcontroladdress" "unix:run/tor/control" config)
+  , Nothing @=? fmap cfDNSListenAddress (hush . makeConfig $
+                  M.insert "dnslistenaddress" "unix:/run/dns" config)
+  , Nothing @=? fmap cfHTTPListenAddress (hush . makeConfig $
+                  M.insert "httplistenaddress" "unix:/run/http" config) ]
 
 config' = toConfig
   [ "User"       ~> "nobody"

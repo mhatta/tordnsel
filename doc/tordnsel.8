@@ -104,8 +104,13 @@ end within 10 seconds. If you serve the public, a reverse proxy in front
 copes better with slow and abusive clients.
 
 .SH TOR CONFIGURATION
-\fBtordnsel\fR needs a \fBtor\fR client with a \fBControlPort\fR (and, for
-active testing, a \fBSocksPort\fR). Cookie and hashed password authentication
+\fBtordnsel\fR needs a \fBtor\fR client with a \fBControlPort\fR or
+\fBControlSocket\fR (and, for active testing, a \fBSocksPort\fR, which may be a
+Unix socket too). Debian's \fBtor\fR package offers both as Unix sockets,
+/run/tor/control and /run/tor/socks, readable by the debian-tor group: set
+\fBTorControlAddress\fR unix:/run/tor/control and \fBTorSocksAddress\fR
+unix:/run/tor/socks, and run \fBtordnsel\fR in that group. Cookie and hashed
+password authentication
 are supported. With cookie authentication, \fBtordnsel\fR uses the SAFECOOKIE
 method, so that the cookie itself is never sent, and stops if \fBtor\fR cannot
 prove that it knows the cookie; plain COOKIE authentication is refused. The
@@ -186,10 +191,12 @@ privileges. (Default: 127.0.0.1:53)
 Return \fIIPADDR\fR in response to requests for the A record matching the
 \fBZoneOfAuthority\fR. (Default: none)
 .TP
-\fBTorControlAddress \fR\fIIPADDR\fR:\fIPORT\fP
-Connect to \fBtor\fR's controller interface on this IP address and TCP port.
-You'll need to set this as your \fBControlListenAddress\fR or \fBControlPort\fR
-in \fBtor\fR's \fItorrc\fR. (Default: 127.0.0.1:9051)
+\fBTorControlAddress \fR\fIIPADDR\fR:\fIPORT\fR | [\fIIPV6ADDR\fR]:\fIPORT\fR | unix:\fIPATH\fP
+Connect to \fBtor\fR's controller interface on this IP address and TCP port,
+or on the Unix socket at this absolute path. You'll need to set this as your
+\fBControlPort\fR or \fBControlSocket\fR in \fBtor\fR's \fItorrc\fR. With
+\fBChangeRootDirectory\fR, the path is inside the new root.
+(Default: 127.0.0.1:9051)
 .TP
 \fBTorControlPassword \fR\fIPASSWORD\fP
 The password you used to generate the \fBHashedControlPassword\fR in \fBtor\fR's
@@ -288,9 +295,10 @@ their exit IP addresses. Enabling this will result in a more accurate view of
 exit IP addresses, at the expense of putting a much greater load on your local
 Tor process and the Tor network itself. (Default: False)
 .TP
-\fBTorSocksAddress \fR\fIIPADDR\fR:\fIPORT\fP
+\fBTorSocksAddress \fR\fIIPADDR\fR:\fIPORT\fR | [\fIIPV6ADDR\fR]:\fIPORT\fR | unix:\fIPATH\fP
 Make exit test connections through \fBtor\fR's \fBSocksPort\fR on this IP
-address and TCP port. (Default: 127.0.0.1:9050)
+address and TCP port, or on the Unix socket at this absolute path
+(\fBSocksPort unix:\fR\fIPATH\fR in the \fItorrc\fR). (Default: 127.0.0.1:9050)
 .TP
 \fBTestListenAddress \fR\fIIPADDR\fR:\fIPORT\fR,\fIPORT\fR,\fI...\fP
 Bind the exit test listeners to this IP address and these TCP ports. These ports

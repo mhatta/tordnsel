@@ -82,9 +82,7 @@ import Data.Map (Map)
 import qualified Data.Set as S
 import Data.Set (Set)
 import Data.Time (UTCTime, getCurrentTime, diffUTCTime)
-import Network.Socket
-  ( HostAddress, SockAddr, Socket, Family(AF_INET), SocketType(Stream)
-  , socket, connect, socketToHandle )
+import Network.Socket (HostAddress, SockAddr, Socket, socketToHandle)
 import System.IO (Handle, IOMode(ReadWriteMode))
 import System.IO.Unsafe (unsafePerformIO)
 import System.Timeout (timeout)
@@ -525,8 +523,8 @@ startTorController
 startTorController net conf mbDelay = liftIO $ do
   log Info "Starting Tor controller."
   (r,tid) <- tryForkLinkIO $ do
-    bracketOnError' (socket AF_INET Stream tcpProtoNum) closeSocket $ \sock -> do
-      connect sock $ nsmcfTorControlAddr conf
+    bracketOnError' (connectStreamSocket $ nsmcfTorControlAddr conf)
+                    closeSocket $ \sock -> do
       -- Whatever answers on the control port may not be Tor and may never
       -- finish the handshake; don't let it hold us up.
       bracketOnError'

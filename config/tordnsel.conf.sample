@@ -55,9 +55,12 @@
 ## no A record will be returned for the zone of authority.
 #Address 10.0.0.1
 
-## Make Tor controller connections to this IP address and TCP port. You'll
-## need to set this as your ControlListenAddress or ControlPort in Tor's
-## torrc. Leave it commented to use the default.
+## Make Tor controller connections to this IP address and TCP port, or to a
+## Unix socket ("unix:" and an absolute path). You'll need to set this as
+## your ControlPort or ControlSocket in Tor's torrc. Leave it commented to
+## use the default. With Debian's tor package, use its control socket (and
+## run TorDNSEL in the debian-tor group):
+#TorControlAddress unix:/run/tor/control
 #TorControlAddress 127.0.0.1:9051
 
 ## The password you used to generate the HashedControlPassword in Tor's
@@ -143,7 +146,9 @@
 #EnableActiveTesting True
 
 ## Make exit test connections through Tor's SocksPort on this IP address
-## and TCP port. Leave it commented to use the default.
+## and TCP port, or Unix socket ("unix:" and an absolute path). Leave it
+## commented to use the default. With Debian's tor package:
+#TorSocksAddress unix:/run/tor/socks
 #TorSocksAddress 127.0.0.1:9050
 
 ## Bind the exit test listeners to this IP address and these TCP ports.
