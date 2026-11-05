@@ -22,11 +22,17 @@ import qualified Data.Map as M
 import Test.HUnit (Test(..), (@=?))
 
 import TorDNSEL.Config.Internals
+import TorDNSEL.Main (supplementaryGroups)
 import TorDNSEL.Util (hush)
 
 tests = TestList . map TestCase $
   [ Just config @=? hush (parseConfigFile configFile)
-  , Just config' @=? hush (parseConfigArgs configArgs) ]
+  , Just config' @=? hush (parseConfigArgs configArgs)
+  -- dropping privileges keeps the user's groups, and only those
+  , [107, 113] @=? supplementaryGroups "tordnsel" 107
+      [(0, ["root"]), (113, ["tordnsel", "other"]), (107, ["tordnsel"])
+      , (27, ["other"])]
+  , [107] @=? supplementaryGroups "tordnsel" 107 [(0, ["root"])] ]
 
 config' = toConfig
   [ "User"       ~> "nobody"

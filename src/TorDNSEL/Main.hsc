@@ -47,7 +47,9 @@ module TorDNSEL.Main (
   , terminateProcess
 
   -- * Daemon operations
+  , Privileges(..)
   , getIDs
+  , supplementaryGroups
   , dropPrivileges
   , changeRootDirectory
   , daemonize
@@ -68,7 +70,7 @@ import Prelude hiding (log)
 import Control.Concurrent (rtsSupportsBoundThreads)
 import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
 import qualified Control.Exception as E
-import Control.Monad (when, liftM, forM, forM_)
+import Control.Monad (when, liftM, forM, forM_, mplus)
 import Control.Monad.Fix (fix)
 import Control.Monad.State.Strict (StateT, runStateT, liftIO, get, put)
 import Data.Bits ((.&.), (.|.))
@@ -76,6 +78,7 @@ import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy.Char8 as L
 import Data.Char (toLower)
 import Data.List (intersperse)
+import qualified Data.List as L
 import qualified Data.Map as M
 import Data.Map (Map)
 import Data.Maybe (isJust, isNothing, fromMaybe)
@@ -260,7 +263,7 @@ main = do
     (exitPrint OSFile . cat "Looking up uid/gid failed: ")
 
   catchIO
-    (checkDirectory (fst ids) (cfChangeRootDirectory conf)
+    (checkDirectory (privUser ids) (cfChangeRootDirectory conf)
                     (cfStateDirectory conf))
     (exitPrint Can'tCreate . cat "Preparing state directory failed: ")
 
@@ -273,7 +276,7 @@ main = do
     (exitPrint Can'tCreate . cat "Opening statistics listener failed: ")
 
   reconfigSock <- catchIO
-    (bindReconfigSocket (cfRuntimeDirectory conf) (fst ids))
+    (bindReconfigSocket (cfRuntimeDirectory conf) (privUser ids))
     (exitPrint Can'tCreate . cat "Opening reconfigure listener failed: ")
 
   -- Created afresh, never through a symbolic link: we're probably root here,
@@ -794,18 +797,49 @@ terminateProcess status static s mbWait = do
 --------------------------------------------------------------------------------
 -- Daemon operations
 
--- | Lookup the UID and GID for a pair of user and group names.
-getIDs :: Maybe String -> Maybe String -> IO (Maybe UserID, Maybe GroupID)
+-- | The identity we drop privileges to: a user, a group, and the
+-- supplementary groups.
+data Privileges = Privileges
+  { privUser   :: !(Maybe UserID)
+  , privGroup  :: !(Maybe GroupID)
+  , privGroups :: ![GroupID] }
+  deriving (Eq, Show)
+
+-- | Look up the identity for a user and group name. Without a group, use the
+-- user's primary group, not root's. The supplementary groups are the user's
+-- (as initgroups(3) would set them, so that e.g. membership in Tor's group,
+-- needed to read its control cookie, survives), or none without a user. Look
+-- them up now: there may be no group database after chrooting.
+getIDs :: Maybe String -> Maybe String -> IO Privileges
 getIDs user group = do
   userEntry <- getUserEntryForName `liftMb` user
   groupEntry <- getGroupEntryForName `liftMb` group
-  return (userID `fmap` userEntry, groupID `fmap` groupEntry)
+  let gid = (groupID `fmap` groupEntry) `mplus` (userGroupID `fmap` userEntry)
+  groups <- case (userEntry, gid) of
+    (Just u, Just g) -> do
+      entries <- getAllGroupEntries
+      return $ supplementaryGroups (userName u) g
+                 [(groupID e, groupMembers e) | e <- entries]
+    (Nothing, Just g) -> return [g]
+    _ -> return []
+  return $ Privileges (userID `fmap` userEntry) gid groups
 
--- | Drop privileges to the given UID\/GID pair.
-dropPrivileges :: (Maybe UserID, Maybe GroupID) -> IO ()
-dropPrivileges (uid,gid) = do
-  whenJust gid setGroupID
-  whenJust uid setUserID
+-- | The supplementary groups for a user: its primary group and every group
+-- that lists it as a member.
+supplementaryGroups :: String -> GroupID -> [(GroupID, [String])] -> [GroupID]
+supplementaryGroups user primary entries =
+  primary : L.nub [g | (g, members) <- entries, user `elem` members
+                     , g /= primary]
+
+-- | Drop privileges: set the supplementary groups first, so that none of
+-- root's (group 0 in particular) are kept, then the group, then the user.
+dropPrivileges :: Privileges -> IO ()
+dropPrivileges p
+  | isNothing (privUser p) && isNothing (privGroup p) = return ()
+  | otherwise = do
+      setGroups (privGroups p)
+      whenJust (privGroup p) setGroupID
+      whenJust (privUser p) setUserID
 
 -- | Call chroot(2) using the given directory path. Throws an 'IOError' if the
 -- call fails.
