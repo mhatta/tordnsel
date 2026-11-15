@@ -142,11 +142,20 @@ startListenerThread :: (Socket -> HostAddress -> IO ()) -> QSemN -> SocketOwner
 startListenerThread notifyServerNewClient sem owner listener addr =
   forkLinkIO $ E.mask $ \restore -> finallyCloseSocket . forever $ do
     waitQSemN sem 1
-    (client,SockAddrInet _ clientAddr) <- restore (accept listener)
+    (client,peer) <- restore (accept listener)
       `E.catch` \(e :: E.SomeException) -> signalQSemN sem 1 >> E.throwIO e
-    let clientAddr' = ntohl clientAddr
-    log Debug "Accepted exit test client from " (inet_htoa clientAddr') '.'
-    notifyServerNewClient client clientAddr'
+    case peer of
+      SockAddrInet _ clientAddr -> do
+        let clientAddr' = ntohl clientAddr
+        log Debug "Accepted exit test client from " (inet_htoa clientAddr') '.'
+        notifyServerNewClient client clientAddr'
+      -- Our listeners are IPv4 sockets, so this shouldn't happen; if it
+      -- does, don't let it leak the client's socket and its handler slot,
+      -- or kill the listener.
+      _ -> do
+        log Warn "Bug: An exit test client connected from a non-IPv4 \
+                 \address, " peer "; closing it."
+        closeSocket client `E.finally` signalQSemN sem 1
   where
     finallyCloseSocket = case owner of
       ExitTestServerOwned -> flip E.finally $ do
@@ -300,7 +309,7 @@ handleMessage conf s (Exit tid reason)
                     | otherwise     = owner
             listener' = Listener addr sock' owner'
         tid' <- startListenerThread ((writeMsgChan (serverChan s) .) . NewClient)
-                                    (handlerSem s) owner sock addr
+                                    (handlerSem s) owner' sock' addr
         listener' `seq` return
           (conf, s { listenerThreads = M.insert tid' listener' .
                                        M.delete tid $ listenerThreads s })
