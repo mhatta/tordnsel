@@ -41,6 +41,10 @@ module TorDNSEL.DNS.Internals (
   , Packet(..)
   , encodeMessage
   , decodeMessage
+  , decodeQuery
+  , maxNamePointers
+  , maxQueryAdditional
+  , maxTCPQueryLength
   , PutState(..)
   , initialPutState
   , PutMessage
@@ -106,7 +110,7 @@ import System.Timeout (timeout)
 
 import Data.Binary (Binary(..), Get, getWord8, putWord8, Word16, Word32)
 import Data.Binary.Get
-  ( runGet, runGetOrFail, getWord16be, getByteString, bytesRead, lookAhead, skip
+  ( Get, runGet, runGetOrFail, getWord16be, getByteString, bytesRead, lookAhead, skip
   , isEmpty )
 import Data.Word (Word8)
 import Data.Binary.Put (runPut, putWord16be, putByteString, PutM)
@@ -144,12 +148,13 @@ runServer sock stats handler = forever $ do
     sourcePort _                          = Nothing
 
 -- | Read a DNS message from a bound UDP socket. Return the source 'SockAddr',
--- the number of bytes read, and @'Just' msg@ if parsing the message succeeded.
+-- the number of bytes read, and @'Just' msg@ if the message is a query we
+-- could parse ('decodeQuery').
 recvMessageFrom :: Socket -> IO (Maybe Message, Int, SockAddr)
 recvMessageFrom sock = do
   -- EDNS(0) queries may be larger than 512 bytes.
   (pkt,sockAddr) <- recvFrom sock 4096
-  return (decodeMessage $ Packet pkt, B.length pkt, sockAddr)
+  return (decodeQuery $ Packet pkt, B.length pkt, sockAddr)
 
 -- | Send a DNS message of at most @limit@ bytes to a 'SockAddr' with a UDP
 -- socket (see 'encodeResponse'). Return the number of bytes sent.
@@ -189,7 +194,8 @@ truncateMessage msg =
 -- | Serve DNS queries arriving over an accepted TCP connection (RFC 7766):
 -- each message is preceded by its length as a 16-bit big-endian integer, and
 -- a client may send queries one after another. Answer them in order until the
--- client closes the connection, sends something that isn't a DNS message, has
+-- client closes the connection, sends something that isn't a DNS query
+-- ('decodeQuery') or is longer than 'maxTCPQueryLength', has
 -- sent @maxQueries@ queries, or makes us wait longer than @idle@ microseconds
 -- (asked anew for each wait, so that it can depend on how busy we are) for a
 -- query or for sending a response. The statistics action and handler are as
@@ -205,9 +211,12 @@ serveTCPConnection sock addr idle maxQueries stats handler = loop maxQueries
       whenJust mbLen $ \lenBytes -> do
         let len = fromIntegral (B.index lenBytes 0) `shiftL` 8 .|.
                   fromIntegral (B.index lenBytes 1)
-        mbPkt <- if len == 0 then return Nothing else recvTimeout len
+        -- A longer message isn't a query we'd answer: close the connection
+        -- rather than read it.
+        mbPkt <- if len == 0 || len > maxTCPQueryLength
+                   then return Nothing else recvTimeout len
         whenJust mbPkt $ \pkt ->
-          whenJust (decodeMessage (Packet pkt)) $ \query -> do
+          whenJust (decodeQuery (Packet pkt)) $ \query -> do
             response <- handler addr query
             sent <- case response >>= encodeResponse 65535 of
               Just bs -> do
@@ -277,6 +286,33 @@ decodeMessage pkt =
   case runGetOrFail (getPacket pkt) (L.fromChunks [unPacket pkt]) of
     Left _          -> Nothing
     Right (_, _, m) -> Just $!! m
+
+-- | Decode a message that arrived as a query: 'decodeMessage', but only for a
+-- message whose header says it's a query (QR clear) asking one question, with
+-- no answer or authority records and at most 'maxQueryAdditional' additional
+-- records (an OPT record, and room for a TSIG). Anything else isn't a query
+-- we can answer, and is dropped without reading its records, so that a
+-- message crafted to be expensive to decode costs us nothing.
+decodeQuery :: Packet -> Maybe Message
+decodeQuery pkt@(Packet bs)
+  | B.length bs < 12                 = Nothing
+  | B.index bs 2 .&. 0x80 /= 0       = Nothing    -- QR: a response
+  | count 4 /= 1                     = Nothing    -- QDCOUNT
+  | count 6 /= 0 || count 8 /= 0     = Nothing    -- ANCOUNT, NSCOUNT
+  | count 10 > maxQueryAdditional    = Nothing    -- ARCOUNT
+  | otherwise                        = decodeMessage pkt
+  where
+    count i = fromIntegral (B.index bs i) `shiftL` 8 .|.
+              (fromIntegral (B.index bs (i + 1)) :: Int)
+
+-- | The most additional records a query may carry (see 'decodeQuery').
+maxQueryAdditional :: Int
+maxQueryAdditional = 2
+
+-- | The longest query we read over TCP. Queries are small; the length prefix
+-- allows 65535 bytes, but there's no reason to read (or decode) that much.
+maxTCPQueryLength :: Int
+maxTCPQueryLength = 4096
 
 -- | A value representing the current name compression targets and current
 -- offset (in bytes) into the datagram we're serializing.
@@ -660,36 +696,49 @@ instance NFData DomainName where
 instance BinaryPacket DomainName where
   -- Read a DomainName as a sequence of 'Label's ending with either a null label
   -- or a pointer to a label in a prior domain name.
-  getPacket (Packet pkt) = do
-    domain <- fmap DomainName . getLabels . fromIntegral =<< bytesRead
-    () <- when (domainLen domain > 255) $
-      fail "domain name too long"
-    return domain
+  --
+  -- A pointer must point backwards, so following pointers always ends; but a
+  -- name may still follow a long chain of pointers, and every record of a
+  -- message may name the end of the same chain, so that decoding a message
+  -- would take time quadratic in its size. Follow at most 'maxNamePointers'
+  -- pointers in one name, and stop reading as soon as the name grows longer
+  -- than 255 bytes, so that each name costs time bounded by a constant.
+  getPacket (Packet pkt) =
+    fmap DomainName . getLabels maxNamePointers 1 . fromIntegral =<< bytesRead
     where
-      domainLen (DomainName name) =
-        1 + sum' (map ((1+) . B.length . unLabel) name)
-      sum' = List.foldl' (+) 0
-
-      getLabels p = do
-        len <- lookAhead getWord8
-        case len of
+      -- @getLabels hops len p@: @hops@ pointers may still be followed, the
+      -- labels read so far take @len@ bytes (counting the final null label),
+      -- and @p@ is where the name (or the part of it a pointer led to) began.
+      getLabels :: Int -> Int -> Int -> Get [Label]
+      getLabels hops len p = do
+        l <- lookAhead getWord8
+        case l of
           0                        -> skip 1 >> return []
-          _ | len .&. 0xc0 == 0xc0 -> do
-                ptr <- xor 0xc000 `fmap` getWord16be
+          _ | l .&. 0xc0 == 0xc0 -> do
+                ptr <- (fromIntegral . xor 0xc000) `fmap` getWord16be
                 () <- unless (ptr < p && ptr >= 12) $
                   fail "invalid name pointer"
-                let priorLen = fromIntegral (p - ptr)
-                    -- names can't overlap
-                    prior = B.take priorLen . B.drop (fromIntegral ptr) $ pkt
-                case runGetOrFail (getLabels ptr) (L.fromChunks [prior]) of
+                () <- when (hops <= 0) $
+                  fail "too many name pointers"
+                let -- names can't overlap
+                    prior = B.take (p - ptr) . B.drop ptr $ pkt
+                case runGetOrFail (getLabels (hops - 1) len ptr)
+                                  (L.fromChunks [prior]) of
                   Left (_, _, e)     -> fail e
                   Right (_, _, ls)   -> return ls
-            | len > 63             -> fail "label too long"
-            | otherwise            -> liftM2 (:) get (getLabels p)
+            | l > 63               -> fail "label too long"
+            | len' > 255           -> fail "domain name too long"
+            | otherwise            -> liftM2 (:) get (getLabels hops len' p)
+            where len' = len + 1 + fromIntegral l
 
   -- Write a DomainName as a possibly null list of 'Label's terminated by
   -- either a null label or a pointer to a label from a prior domain name.
   putPacket = (lift . putByteString =<<) . compressNameStatefully
+
+-- | The most compression pointers we follow while reading one domain name. A
+-- name has at most 127 labels, so a well-formed one never needs more.
+maxNamePointers :: Int
+maxNamePointers = 127
 
 -- | A 'DomainName' is represented as a sequence of labels.
 newtype Label = Label { unLabel :: ByteString }

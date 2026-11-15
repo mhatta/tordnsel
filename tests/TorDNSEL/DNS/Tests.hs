@@ -38,7 +38,48 @@ tests = TestList . map TestCase $
   , Just (Question name TA AnyClass) @=?
       fmap msgQuestion (decodeMessage anyClassQuery)
   , compNames' @=? compNames
-  , decompNames' @=? decompNames ]
+  , decompNames' @=? decompNames
+  -- Following a chain of compression pointers: within 'maxNamePointers'
+  -- the name decodes; beyond it, the message is rejected.
+  -- (The second record's name is a pointer to the chain's end: following it
+  -- takes n + 1 pointers.)
+  , Just name @=? fmap (rrName . (!! 1) . msgAnswers)
+                       (decodeMessage (pointerChain (maxNamePointers - 1) 2))
+  , Nothing @=? decodeMessage (pointerChain maxNamePointers 2)
+  -- 'decodeQuery' takes queries only, and never reads their records.
+  , Just q @=? decodeQuery query
+  , Nothing @=? decodeQuery aResponse
+  , Nothing @=? decodeQuery (pointerChain 100 50)
+  , Nothing @=? decodeQuery (withCounts 2 0 0 0 query)
+  , Nothing @=? decodeQuery (withCounts 1 0 0 3 query)
+  , Nothing @=? decodeQuery (Packet (B.take 11 (unPacket query))) ]
+
+-- | A response whose answer section starts with a record holding, as its data,
+-- a chain of @n@ compression pointers each pointing to the one before (the
+-- first to the question's name), followed by @m - 1@ records named by the
+-- last pointer in the chain.
+pointerChain :: Int -> Int -> Packet
+pointerChain n m = Packet . B.pack . map fromIntegral $
+  header ++ question ++ first ++ chain ++ concat (replicate (m - 1) rec)
+  where
+    w16 x = [x `div` 256, x `mod` 256]
+    header = [0x8e, 0xba, 0x81, 0x80] ++ w16 1 ++ w16 m ++ w16 0 ++ w16 0
+    question = [5] ++ map fromEnum "yahoo" ++ [3] ++ map fromEnum "com" ++ [0]
+               ++ w16 1 ++ w16 1
+    -- The first record: named "yahoo.com" by pointer, of an unsupported type,
+    -- with the chain as its data.
+    first = w16 (0xc000 + 12) ++ w16 99 ++ w16 1 ++ [0,0,0,0] ++ w16 (2 * n)
+    chainStart = 12 + length question + length first
+    chain = concat [ w16 (0xc000 + if i == 0 then 12 else chainStart + 2*(i-1))
+                   | i <- [0 .. n - 1] ]
+    rec = w16 (0xc000 + chainStart + 2 * (n - 1)) ++ w16 99 ++ w16 1
+          ++ [0,0,0,0] ++ w16 0
+
+-- | Overwrite the four section counts of a message's header.
+withCounts :: Int -> Int -> Int -> Int -> Packet -> Packet
+withCounts qd an ns ar (Packet bs) = Packet $ B.concat
+  [ B.take 4 bs, B.pack (concatMap w16 [qd, an, ns, ar]), B.drop 12 bs ]
+  where w16 x = map fromIntegral [x `div` 256, x `mod` 256]
 
 q = Message 0x8eba False StandardQuery False False True False False False
       NoError (Question name TA IN) [] [] []
