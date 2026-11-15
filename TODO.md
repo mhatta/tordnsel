@@ -39,6 +39,12 @@ See [ChangeLog](ChangeLog).
   exit test listener limits, DNS amplification, stored test results,
   statistics socket)
 
+## Done in 0.4.1
+
+- [x] fixes for the problems found in an audit of 0.4.0 (DNS decoding and
+  exit policy evaluation costs, web connection limits, reconfigure socket)
+- [x] Debian packaging (tordnsel on Salsa)
+
 ## Still to do
 
 - [ ] IPv6
@@ -48,5 +54,4 @@ See [ChangeLog](ChangeLog).
   - [ ] "me" queries and `/api/ip` from IPv6 hosts
 - [ ] persist the network state (not only exit test results) across restarts,
   so that answers are available before Tor has delivered all descriptors
-- [ ] Debian packaging (ITP filed; packaging on Salsa, debian/tordnsel)
 - [ ] don't trust the local running environment to be sane or safe

@@ -1,3 +1,45 @@
+0.4.1 - 2026-11-16
+  o Security (from an audit of 0.4.0):
+    - DNS: decoding a message could take time quadratic in its size: a
+      name could follow any number of compression pointers, and every
+      record could name the end of one long chain. A 4 KB UDP datagram
+      took about 30 ms and a 64 KB TCP message about 5 s, before rate
+      limiting, so a trickle of spoofed datagrams stopped the server. A
+      name now follows at most 127 pointers; only messages shaped like a
+      query (one question, no answer or authority records, at most two
+      additional records) are decoded; and TCP messages longer than 4096
+      bytes close the connection.
+    - Exit policies: asking whether a policy accepts any destination, or
+      any in an operator's list, could take time cubic in the number of
+      its rules (5 s for 1600 rules), for every query about the relay's
+      address. One relay with such a policy and a query a second stopped
+      the server. Whether a descriptor's policy accepts anything at all is
+      now worked out once, when the descriptor arrives, and the work is
+      bounded: past 8192 rectangles of undecided address/port space (256
+      for a list query, asked anew each time), a policy counts as
+      accepting.
+    - Web interface: connections are limited per client network (/24 for
+      IPv4, /56 for IPv6) rather than per address, so that eight IPv4
+      addresses, or one IPv6 host, can't take every handler; there are
+      128 handlers (64 before), and clients get 1 second rather than 3 to
+      send their request while more than half are busy.
+    - The reconfigure socket reads at most 1 MB, within 10 seconds.
+
+  o Other:
+    - Run on up to four capabilities (-maxN4), so that a busy thread
+      doesn't hold up the others; +RTS -N overrides it.
+    - DNS: a query with more than one OPT record, or one not owned by the
+      root, gets a FORMERR (RFC 6891).
+    - Exit test listeners restarted after a failure use the reopened
+      socket (they were started on the old, closed one, and failed once
+      more), and a client from a non-IPv4 address no longer leaks its
+      socket and kills the listener.
+
+  o Upgrading:
+    - A relay whose exit policy is too complex to evaluate exactly (see
+      above) is listed as an exit. Policies rejecting tens of separate
+      networks and hundreds of separate ports are still evaluated exactly.
+
 0.4.0 - 2026-11-05
   o Security (from an audit of 0.3.0):
     - Dropping privileges: without Group, use the user's primary group
