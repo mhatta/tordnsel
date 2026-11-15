@@ -23,7 +23,7 @@ import TorDNSEL.ExitList
 import TorDNSEL.Util
 
 tests :: Test
-tests = TestList [patterns, namedLists, someAccepted]
+tests = TestList [patterns, namedLists, someAccepted, boundedWork]
 
 patterns :: Test
 patterns = TestList . map TestCase $
@@ -88,6 +88,43 @@ someAccepted = TestList . map TestCase $
     policy :: B.ByteString -> ExitPolicy
     policy = either (error . ($ "")) id . parseExitPolicy . parseDocument
            . B.lines
+
+-- | A policy built to shatter the undecided space: rejecting single ports on
+-- every address, then single addresses on every port, leaves a grid whose
+-- pieces grow with the square of the number of rules. The answer is decided
+-- only by the last rule, so without a bound this would take seconds; with it,
+-- we give up early and count the relay as an exit.
+boundedWork :: Test
+boundedWork = TestList . map TestCase $
+  [ True @=? policyAcceptsSome [AddrPortPattern 0 0 0 65535] grid
+  , True @=? descExitsAnywhere (mkDescriptor 0 0 rid grid)
+  -- a small grid stays within the bound and is answered exactly
+  , False @=? policyAcceptsSome [AddrPortPattern 0 0 0 65535] (gridOf 10)
+  , False @=? descExitsAnywhere (mkDescriptor 0 0 rid (gridOf 10))
+  , True @=? descExitsAnywhere
+               (mkDescriptor 0 0 rid [Rule Accept 0 0 80 80])
+  , True @=? policyAcceptsDestination anyDestination grid
+  -- a policy rejecting many networks and many separate ports, and accepting
+  -- nothing, is answered exactly for a descriptor
+  , False @=? descExitsAnywhere (mkDescriptor 0 0 rid manyRejects)
+  ]
+  where
+    grid = gridOf 800
+    gridOf :: Int -> ExitPolicy
+    gridOf n =
+      [ Rule Reject 0 0 (2 * fromIntegral k) (2 * fromIntegral k)
+      | k <- [1 .. n `div` 2] ] ++
+      [ Rule Reject (fromIntegral k * 4096) 0xffffffff 0 65535
+      | k <- [1 .. n `div` 2] ] ++
+      -- accepts only what's already rejected, then rejects the rest
+      [ Rule Accept 0 0 2 2, Rule Reject 0 0 0 65535 ]
+    manyRejects =
+      [ Rule Reject (fromIntegral k * 0x01000000) 0xff000000 0 65535
+      | k <- [1 .. 10 :: Int] ] ++
+      [ Rule Reject 0 0 (2 * k) (2 * k) | k <- [1 .. 60] ] ++
+      [ Rule Reject 0 0 0 65535 ]
+    rid = either (error . ($ "")) id . decodeBase16RouterID $
+            B.replicate 40 'A'
 
 isErr :: Either ShowS a -> Bool
 isErr = isLeft

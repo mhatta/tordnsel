@@ -23,6 +23,7 @@
 module TorDNSEL.Directory.Internals (
   -- * Router descriptors
     Descriptor(..)
+  , mkDescriptor
   , parseDescriptor
   , parseDescriptors
 
@@ -43,6 +44,13 @@ module TorDNSEL.Directory.Internals (
   , RuleType(..)
   , parseExitPolicy
   , exitPolicyAccepts
+  , exitPolicyAcceptsSome
+  , exitPolicyAcceptsSome'
+  , Rect(..)
+  , netRect
+  , wholeRect
+  , maxUndecidedRects
+  , maxUndecidedRectsOnce
   , privateNetworks
   ) where
 
@@ -52,13 +60,14 @@ import Data.Char
   ( ord, isSpace, isHexDigit, digitToInt, isAscii, isAsciiUpper
   , isAsciiLower, isAlpha, isDigit, toLower )
 import qualified Data.List as L
-import Data.Bits ((.|.), (.&.), shiftL, shiftR)
+import Data.Bits ((.|.), (.&.), complement, shiftL, shiftR)
 import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString as W
 import Data.ByteString (ByteString)
 import Data.Time (UTCTime)
 import Data.Time.Clock.POSIX
   (POSIXTime, utcTimeToPOSIXSeconds, posixSecondsToUTCTime)
+import Data.Word (Word32)
 import Network.Socket (HostAddress)
 
 import TorDNSEL.Document
@@ -76,12 +85,26 @@ data Descriptor = Desc
     -- | This router's identifier.
     descRouterID   :: !RouterID,
     -- | This router's exit policy.
-    descExitPolicy :: !ExitPolicy }
+    descExitPolicy :: !ExitPolicy,
+    -- | Does the exit policy accept connections to any address and port at
+    -- all? Every \"exit\" query asks, so it's worked out once, when the
+    -- descriptor is parsed (in the thread talking to Tor, not one answering
+    -- queries), and kept with it.
+    descExitsAnywhere :: !Bool }
 
 instance Show Descriptor where
   showsPrec _ d = cat (descRouterID d) ' ' (inet_htoa $ descListenAddr d) ' '
     (posixSecondsToUTCTime $ descPublished d) '\n'
     (L.foldl' (.) id (map (\p -> shows p . ('\n' :)) (descExitPolicy d)))
+
+-- | Make a descriptor from its fields, working out 'descExitsAnywhere' from
+-- the exit policy. That's done once per descriptor, so it may take more
+-- work than a query may ('maxUndecidedRectsOnce'), and is exact for any
+-- policy short of one built to defeat it.
+mkDescriptor :: HostAddress -> POSIXTime -> RouterID -> ExitPolicy -> Descriptor
+mkDescriptor addr time rid policy =
+  Desc addr time rid policy
+       (exitPolicyAcceptsSome' maxUndecidedRectsOnce [wholeRect] policy)
 
 -- | Parse a router descriptor. Return the result or 'throwError' in the monad
 -- if the format is invalid.
@@ -92,7 +115,7 @@ parseDescriptor items =
     time       <- parsePOSIXTime =<< findArg (B.pack "published")   items
     fp         <- parseRouterID  =<< findArg (B.pack "fingerprint") items
     exitPolicy <- parseExitPolicy . filter isRule $ items
-    return $! Desc address time fp exitPolicy
+    return $! mkDescriptor address time fp exitPolicy
   where
     isRule = (\k -> k == (B.pack "accept") || k == B.pack("reject")) . iKey
 
@@ -339,3 +362,94 @@ exitPolicyAccepts addr port exitPolicy
     matchingRules = map ruleType . filter matches $ exitPolicy
     matches r = addr .&. ruleMask r == ruleAddress r &&
                 ruleBeginPort r <= port && port <= ruleEndPort r
+
+-- | Does an exit policy accept a connection to at least one address\/port in
+-- the given rectangles?
+--
+-- Tor applies the first rule matching a connection, and accepts the
+-- connection if none matches. We track the part of the destination space not
+-- yet decided by an earlier rule, as disjoint rectangles: an accept rule that
+-- overlaps it means some destination is accepted; a reject rule removes its
+-- rectangle from it.
+--
+-- Each reject rule can split every undecided rectangle in four, so a relay
+-- could publish a policy (a grid of rules rejecting single ports and single
+-- addresses) that makes the undecided part shatter into a number of pieces
+-- that grows with the square of the number of rules, and the work with its
+-- cube: a few seconds for a policy that fits in a descriptor. Should the
+-- undecided part ever need more than 'maxUndecidedRects' rectangles, give up
+-- and answer that some destination is accepted. That errs on the side of
+-- listing the relay, which is the safe side for an exit list, and the
+-- addresses so listed are the relay's own.
+exitPolicyAcceptsSome :: [Rect] -> ExitPolicy -> Bool
+exitPolicyAcceptsSome = exitPolicyAcceptsSome' maxUndecidedRects
+
+-- | 'exitPolicyAcceptsSome', giving up past the given number of rectangles.
+exitPolicyAcceptsSome' :: Int -> [Rect] -> ExitPolicy -> Bool
+exitPolicyAcceptsSome' maxRects = go
+  where
+    go [] _ = False
+    go _ [] = True
+    go undecided (r:rs)
+      | ruleType r == Accept = any (overlaps rect) undecided || go undecided rs
+      | otherwise = case boundedSubtract maxRects undecided of
+          Just undecided' -> go undecided' rs
+          Nothing         -> True
+      where
+        rect = ruleRect r
+        -- Subtract the rule's rectangle from every undecided rectangle,
+        -- failing as soon as the result would be too large.
+        boundedSubtract _ [] = Just []
+        boundedSubtract n (u:us) =
+          let pieces = subtractRect u rect
+              n' = n - length pieces
+          in if n' < 0 then Nothing
+                       else (pieces ++) `fmap` boundedSubtract n' us
+
+-- | The most rectangles 'exitPolicyAcceptsSome' keeps track of, answering a
+-- query.
+maxUndecidedRects :: Int
+maxUndecidedRects = 256
+
+-- | The most rectangles we keep track of working out 'descExitsAnywhere',
+-- once per descriptor: enough for policies rejecting tens of separate
+-- networks and hundreds of separate ports, and still well under a second for the worst policy a
+-- descriptor can hold.
+maxUndecidedRectsOnce :: Int
+maxUndecidedRectsOnce = 8192
+
+-- | A rectangle in (address, port) space; all bounds are inclusive.
+data Rect = Rect !Word32 !Word32 !Int !Int
+  deriving (Eq, Show)
+
+-- | Every IPv4 address and port.
+wholeRect :: Rect
+wholeRect = Rect 0 0xffffffff 0 65535
+
+ruleRect :: Rule -> Rect
+ruleRect r = netRect (ruleAddress r) (ruleMask r)
+                     (fromIntegral $ ruleBeginPort r)
+                     (fromIntegral $ ruleEndPort r)
+
+-- | The rectangle of a network and a port range. Masks are assumed to be
+-- contiguous prefixes, which is all Tor emits.
+netRect :: Word32 -> Word32 -> Int -> Int -> Rect
+netRect addr mask = Rect lo (lo .|. complement mask)
+  where lo = addr .&. mask
+
+overlaps :: Rect -> Rect -> Bool
+overlaps (Rect a1 a2 p1 p2) (Rect b1 b2 q1 q2) =
+  a1 <= b2 && b1 <= a2 && p1 <= q2 && q1 <= p2
+
+-- | The part of the first rectangle not covered by the second, as at most
+-- four disjoint rectangles.
+subtractRect :: Rect -> Rect -> [Rect]
+subtractRect r@(Rect a1 a2 p1 p2) s@(Rect b1 b2 q1 q2)
+  | not (overlaps r s) = [r]
+  | otherwise = concat
+      [ [Rect a1 (b1 - 1) p1 p2 | b1 > a1]
+      , [Rect (b2 + 1) a2 p1 p2 | b2 < a2]
+      , [Rect lo hi p1 (q1 - 1) | q1 > p1]
+      , [Rect lo hi (q2 + 1) p2 | q2 < p2] ]
+  where lo = max a1 b1
+        hi = min a2 b2

@@ -32,11 +32,11 @@ networkState = NetworkState
       , (ip "10.0.0.12", S.singleton ridB)
       , (ip "10.0.0.13", S.singleton ridC) ]
   , nsRouters = M.fromList
-      [ (ridA, (router $ Desc (ip "10.0.0.11") (now - 3600) ridA policyA)
+      [ (ridA, (router $ mkDescriptor (ip "10.0.0.11") (now - 3600) ridA policyA)
                  { rtrTestResults = Just $ TestResults (utc $ now - 3600)
                      (M.singleton (ip "10.0.0.99") (utc $ now - 600)) })
-      , (ridB, router $ Desc (ip "10.0.0.12") (now - 3 * 86400) ridB policyA)
-      , (ridC, router $ Desc (ip "10.0.0.13") (now - 3600) ridC policyC) ] }
+      , (ridB, router $ mkDescriptor (ip "10.0.0.12") (now - 3 * 86400) ridB policyA)
+      , (ridC, router $ mkDescriptor (ip "10.0.0.13") (now - 3600) ridC policyC) ] }
   where
     router d = Router (Just d) Nothing True (utc now)
     utc = posixSecondsToUTCTime

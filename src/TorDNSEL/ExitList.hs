@@ -32,6 +32,7 @@ module TorDNSEL.ExitList (
   , showAddrPortPattern
   , policyAcceptsDestination
   , policyAcceptsSome
+  , descriptorAcceptsDestination
 
   -- * Named lists
   , ListName
@@ -51,7 +52,7 @@ module TorDNSEL.ExitList (
 
 import Control.Monad (when, unless)
 import Control.Monad.Except (MonadError(throwError))
-import Data.Bits ((.&.), (.|.), complement, shiftL, popCount)
+import Data.Bits ((.&.), shiftL, popCount)
 import qualified Data.ByteString.Char8 as B
 import Data.ByteString (ByteString)
 import Data.Char (isAlphaNum, toLower)
@@ -64,7 +65,8 @@ import Data.Word (Word32)
 import Network.Socket (HostAddress)
 
 import TorDNSEL.Directory
-import TorDNSEL.Directory.Internals (Rule(..), RuleType(..))
+import TorDNSEL.Directory.Internals
+  ( Rect, netRect, wholeRect, exitPolicyAcceptsSome )
 import TorDNSEL.NetworkState.Types
 import TorDNSEL.Util
 
@@ -75,6 +77,7 @@ import TorDNSEL.Util
 data Destination
   = DestAddrPort !HostAddress !Port -- ^ A single IPv4 address and port.
   | DestAnyOf ![AddrPortPattern]    -- ^ Any member of a set of patterns.
+  | DestAny                         -- ^ Any address and port at all.
   deriving (Eq, Show)
 
 -- | An IPv4 network and an inclusive port range, e.g. @192.0.2.0/24:6660-6669@.
@@ -144,63 +147,30 @@ policyAcceptsDestination :: Destination -> ExitPolicy -> Bool
 {-# INLINE policyAcceptsDestination #-}
 policyAcceptsDestination (DestAddrPort a p) = exitPolicyAccepts a p
 policyAcceptsDestination (DestAnyOf pats)   = policyAcceptsSome pats
+policyAcceptsDestination DestAny            = exitPolicyAcceptsSome [wholeRect]
 
 -- | Does an exit policy accept a connection to at least one address\/port
--- covered by the given patterns?
---
--- Tor applies the first rule matching a connection, and accepts the
--- connection if none matches. We track the part of the destination space not
--- yet decided by an earlier rule: an accept rule that overlaps it means some
--- destination is accepted; a reject rule removes its rectangle from it.
+-- covered by the given patterns? (See 'exitPolicyAcceptsSome'.)
 policyAcceptsSome :: [AddrPortPattern] -> ExitPolicy -> Bool
-policyAcceptsSome pats = go (map patternRect pats)
-  where
-    go [] _ = False
-    go _ [] = True
-    go undecided (r:rs)
-      | ruleType r == Accept = any (overlaps rect) undecided ||
-                               go undecided rs
-      | otherwise            = go (concatMap (`subtractRect` rect) undecided) rs
-      where rect = ruleRect r
-
--- | A rectangle in (address, port) space; all bounds are inclusive.
-data Rect = Rect !Word32 !Word32 !Int !Int
+policyAcceptsSome pats = exitPolicyAcceptsSome (map patternRect pats)
 
 patternRect :: AddrPortPattern -> Rect
 patternRect p = netRect (patAddress p) (patMask p)
                         (fromIntegral $ patBeginPort p)
                         (fromIntegral $ patEndPort p)
 
-ruleRect :: Rule -> Rect
-ruleRect r = netRect (ruleAddress r) (ruleMask r)
-                     (fromIntegral $ ruleBeginPort r)
-                     (fromIntegral $ ruleEndPort r)
-
--- Masks are assumed to be contiguous prefixes, which is all Tor emits.
-netRect :: Word32 -> Word32 -> Int -> Int -> Rect
-netRect addr mask = Rect lo (lo .|. complement mask)
-  where lo = addr .&. mask
-
-overlaps :: Rect -> Rect -> Bool
-overlaps (Rect a1 a2 p1 p2) (Rect b1 b2 q1 q2) =
-  a1 <= b2 && b1 <= a2 && p1 <= q2 && q1 <= p2
-
--- | The part of the first rectangle not covered by the second, as at most
--- four disjoint rectangles.
-subtractRect :: Rect -> Rect -> [Rect]
-subtractRect r@(Rect a1 a2 p1 p2) s@(Rect b1 b2 q1 q2)
-  | not (overlaps r s) = [r]
-  | otherwise = concat
-      [ [Rect a1 (b1 - 1) p1 p2 | b1 > a1]
-      , [Rect (b2 + 1) a2 p1 p2 | b2 < a2]
-      , [Rect lo hi p1 (q1 - 1) | q1 > p1]
-      , [Rect lo hi (q2 + 1) p2 | q2 < p2] ]
-  where lo = max a1 b1
-        hi = min a2 b2
+-- | Does a router's descriptor say it accepts connections to the
+-- destination? As 'policyAcceptsDestination', but answering for any
+-- destination from what the descriptor keeps ('descExitsAnywhere').
+descriptorAcceptsDestination :: Destination -> Descriptor -> Bool
+{-# INLINE descriptorAcceptsDestination #-}
+descriptorAcceptsDestination DestAny d = descExitsAnywhere d
+descriptorAcceptsDestination dest    d = policyAcceptsDestination dest
+                                           (descExitPolicy d)
 
 -- | A destination matching every IPv4 address and port.
 anyDestination :: Destination
-anyDestination = DestAnyOf [AddrPortPattern 0 0 0 65535]
+anyDestination = DestAny
 
 --------------------------------------------------------------------------------
 -- Named lists
@@ -258,8 +228,7 @@ routersExitingFrom s addr =
 isExitTo :: POSIXTime -> NetworkState -> HostAddress -> Destination -> Bool
 {-# INLINE isExitTo #-}
 isExitTo now s addr dest = any ok (routersExitingFrom s addr)
-  where ok d = isRunning now d && policyAcceptsDestination dest
-                                    (descExitPolicy d)
+  where ok d = isRunning now d && descriptorAcceptsDestination dest d
 
 -- | The identities of the running Tor exit nodes exiting from the given
 -- address whose exit policy permits connections to the destination.
@@ -267,7 +236,7 @@ exitFingerprints
   :: POSIXTime -> NetworkState -> HostAddress -> Destination -> [RouterID]
 exitFingerprints now s addr dest =
   [ descRouterID d | d <- routersExitingFrom s addr, isRunning now d
-                   , policyAcceptsDestination dest (descExitPolicy d) ]
+                   , descriptorAcceptsDestination dest d ]
 
 -- | All addresses from which running Tor exit nodes whose exit policy permits
 -- connections to the destination may exit, in ascending order.
@@ -276,6 +245,5 @@ exitAddressesTo now s dest =
   [addr | (addr,rids) <- M.toAscList (nsAddrs s), any ok (S.elems rids)]
   where
     ok rid = case rtrDescriptor =<< rid `M.lookup` nsRouters s of
-      Just d -> isRunning now d &&
-                policyAcceptsDestination dest (descExitPolicy d)
+      Just d -> isRunning now d && descriptorAcceptsDestination dest d
       Nothing -> False

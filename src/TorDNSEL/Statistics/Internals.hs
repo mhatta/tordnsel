@@ -41,7 +41,6 @@ import System.Timeout
 import TorDNSEL.Control.Concurrent.Link
 import TorDNSEL.Control.Concurrent.Util
 import TorDNSEL.DNS.Server
-import TorDNSEL.Directory (Descriptor(..))
 import TorDNSEL.ExitList
 import TorDNSEL.NetworkState (readNetworkState)
 import TorDNSEL.NetworkState.Types
@@ -263,7 +262,7 @@ renderMetrics version s start now ns = B.pack . unlines $ concat
     descs = [ d | r <- M.elems routers, Just d <- [rtrDescriptor r] ]
     running d = isRunning now d
     runningExit d = isRunning now d &&
-                    policyAcceptsDestination anyDestination (descExitPolicy d)
+                    descriptorAcceptsDestination anyDestination d
     count p = fromIntegral . length $ filter p descs
     counter name help v = metric name "counter" help [("", v)]
     metric :: String -> String -> String -> [(String, Integer)] -> [String]
