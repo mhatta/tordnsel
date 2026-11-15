@@ -40,6 +40,7 @@ module TorDNSEL.DNS (
   -- * EDNS(0)
   , EDNS(..)
   , findEDNS
+  , malformedOPT
   , ednsRecord
   , badVersRCode
   , ClientSubnet(..)

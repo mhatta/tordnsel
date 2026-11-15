@@ -287,6 +287,10 @@ dnsResponse c src msg now ns = withEDNS $ case () of
   _ | msgOpCode msg /= StandardQuery -- RFC 3425
     -> (Other, r { msgAA = False, msgRCode = NotImplemented
                  , msgAnswers = [], msgAuthority = [dnsSOA c] })
+    -- RFC 6891: at most one OPT record, owned by the root
+    | badOPT
+    -> (Other, r { msgAA = False, msgRCode = FormatError
+                 , msgAnswers = [], msgAuthority = [] })
     -- RFC 6891: we only speak EDNS version 0
     | Just e <- edns, ednsVersion e > 0
     -> (Other, r { msgAA = False, msgRCode = fst badVersRCode
@@ -323,7 +327,11 @@ dnsResponse c src msg now ns = withEDNS $ case () of
           | otherwise      -> (Negative, nxDomain (soaFor query))
     | otherwise -> (Other, nxDomain soa) -- impossible
   where
-    edns = findEDNS msg
+    badOPT = malformedOPT msg
+    -- Which of several OPT records would we answer? None: a FORMERR without
+    -- one, as a server that didn't speak EDNS would send.
+    edns | badOPT    = Nothing
+         | otherwise = findEDNS msg
     withEDNS (typ,resp) = case edns of
       Nothing -> (typ, resp)
       Just e  -> (typ, resp { msgAdditional =

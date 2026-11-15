@@ -73,6 +73,7 @@ module TorDNSEL.DNS.Internals (
   -- * EDNS(0)
   , EDNS(..)
   , findEDNS
+  , malformedOPT
   , ednsRecord
   , parseEDNSOptions
   , renderEDNSOptions
@@ -856,6 +857,16 @@ data EDNS = EDNS
   } deriving (Eq, Show)
 
 -- | Find the EDNS information in a message's additional section, if any.
+-- | Does a message carry its OPT pseudo-record wrongly: more than one, or
+-- one not owned by the root (RFC 6891, sections 6.1.1 and 6.1.2)? A query
+-- that does gets a FORMERR.
+malformedOPT :: Message -> Bool
+malformedOPT msg = case [rrName rr | rr@UnsupportedResourceRecord{rrType = TOPT}
+                                      <- msgAdditional msg] of
+  []                 -> False
+  [DomainName []]    -> False
+  _                  -> True
+
 findEDNS :: Message -> Maybe EDNS
 findEDNS msg = case [rr | rr@UnsupportedResourceRecord{rrType = TOPT}
                             <- msgAdditional msg] of

@@ -172,6 +172,19 @@ responses = TestCase $ do
   Just (EDNS 1232 0 0 True (Just [])) @=? findEDNS r16
   (NoError, Just (EDNS 1232 1 0 True (Just [])))
     @=? (msgRCode r17, findEDNS r17)
+  -- two OPT records, or one not owned by the root: FORMERR, without OPT
+  let opt owner = UnsupportedResourceRecord owner 0x8000 TOPT
+                    (UnsupportedClass 4096) B.empty
+      soaQuery = query (toName ["torhosts","example","com"]) TSOA
+      (_,r16b) = dnsResponse conf client
+                   (soaQuery `withAdditional` [opt (DomainName []),
+                                               opt (DomainName [])])
+                   now networkState
+      (_,r16c) = dnsResponse conf client
+                   (soaQuery `withAdditional` [opt (toName ["example"])])
+                   now networkState
+  (FormatError, Nothing) @=? (msgRCode r16b, findEDNS r16b)
+  (FormatError, Nothing) @=? (msgRCode r16c, findEDNS r16c)
 
   -- EDNS client subnet (RFC 7871): "me" queries are about the client
   -- subnet the resolver gives; the answer's scope says it depends on it
