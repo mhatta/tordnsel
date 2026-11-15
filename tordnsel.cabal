@@ -109,7 +109,10 @@ executable tordnsel
   main-is:          tordnsel.hs
   hs-source-dirs:   app
   build-depends:    tordnsel
-  ghc-options:      -threaded -rtsopts
+  -- Several capabilities, so that one busy thread (a slow client, a costly
+  -- query) doesn't hold up the rest, but no more than a few: the work is
+  -- mostly waiting on sockets, and every capability costs GC time.
+  ghc-options:      -threaded -rtsopts "-with-rtsopts=-maxN4"
 
 test-suite runtests
   import:           shared
