@@ -45,10 +45,12 @@ limits = do
   addr <- getSocketName listener
   web <- startWebServer
            (WebConfig listener M.empty Nothing (return ()) [] [] (return ""))
-  let open1 = do
+  let openFrom src = do
         c <- socket AF_INET Stream 0
+        bind c (SockAddrInet 0 (htonl $ ip src))
         connect c addr
         return c
+      open1 = openFrom "127.0.0.1"
       -- closed (or answered with an error before being closed) in time
       closedWithin us c = do
         r <- E.try (timeout us (NSB.recv c 1))
@@ -56,10 +58,12 @@ limits = do
           Right (Just _)  -> True
           Right Nothing   -> False
           Left (_ :: E.IOException) -> True
-  silent <- mapM (const open1) [1 .. 8 :: Int]
+  -- connections are counted by network: these eight come from two
+  -- addresses in one /24 ...
+  silent <- mapM openFrom (replicate 4 "127.0.0.1" ++ replicate 4 "127.0.0.2")
   threadDelay 100000
-  -- the ninth connection from this address is closed at once
-  ninth <- open1
+  -- ... so a ninth from a third address in it is closed at once
+  ninth <- openFrom "127.0.0.3"
   closedWithin 1000000 ninth >>= (@? "ninth connection kept open")
   -- the silent ones are closed after the 3 s request timeout
   t0 <- getPOSIXTime

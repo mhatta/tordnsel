@@ -98,9 +98,10 @@ by default), or of all exits, one per line.
 \fB/exit-addresses\fP
 The results of active exit tests.
 .PP
-Up to 64 requests are served at a time, at most 8 from one client address.
-A client must send its request within 3 seconds, and the whole exchange must
-end within 10 seconds. If you serve the public, a reverse proxy in front
+Up to 128 requests are served at a time, at most 8 from one client network
+(a /24 for IPv4, a /56 for IPv6).
+A client must send its request within 3 seconds (1 second when more than half
+the handlers are busy), and the whole exchange must end within 10 seconds. If you serve the public, a reverse proxy in front
 copes better with slow and abusive clients.
 
 .SH TOR CONFIGURATION

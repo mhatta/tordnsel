@@ -76,14 +76,16 @@ import qualified Control.Exception as E
 import Control.Monad (when, forever, unless, join)
 import Control.Monad.Fix (fix)
 import qualified Data.ByteString.Char8 as B
+import Data.Bits ((.&.))
 import Data.ByteString (ByteString)
 import Data.Char (chr, digitToInt, isHexDigit, toLower, toUpper, isDigit)
 import qualified Data.Map as M
 import Data.Maybe (isJust, isNothing, mapMaybe)
 import qualified Data.Set as S
+import Data.Word (Word32)
 import Data.Time.Clock.POSIX (POSIXTime, getPOSIXTime)
 import Network.Socket
-  (Socket, SockAddr(..), HostAddress, HostAddress6, accept, getSocketName)
+  (Socket, SockAddr(..), HostAddress, accept, getSocketName)
 import Network.Socket.ByteString (recv, sendAll)
 import System.Timeout (timeout)
 
@@ -180,10 +182,18 @@ startWebServer initConf = do
               loop s
           | otherwise -> do
           let conf = webConf s
+              -- When more than half the handlers are taken, give clients
+              -- less time to send their request, so that ones that hold
+              -- connections open without sending anything are let go
+              -- sooner.
+              waitForHead | 2 * M.size (handlers s) > maxHandlers =
+                              busyHeadTimeout
+                          | otherwise = headTimeout
           handler <- forkLinkIO . (`E.finally` signalQSem sem) .
                        (`E.finally` closeSocket client) $ do
             webRequestStats conf
-            r <- E.try . timeout handlerTimeout $ serveClient conf client addr
+            r <- E.try . timeout handlerTimeout $
+                   serveClient conf waitForHead client addr
             case r of
               Left (e :: E.IOException) ->
                 log Debug "Error serving web client " addr ": " e
@@ -249,19 +259,26 @@ startWebServer initConf = do
 
   return $ WebServer (writeMsgChan chan) tid
   where
-    maxHandlers = 64
+    maxHandlers = 128
     maxPerClient = 8
     handlerTimeout = 10 * 10^(6 :: Int)
 
--- | Who a client is, for limiting connections per client: its IP address.
-data ClientKey = Client4 !HostAddress | Client6 !HostAddress6 | OtherClient
+-- | Who a client is, for limiting connections per client: its network, as
+-- for the DNS server's limits, a /24 for IPv4 and a /56 for IPv6. Counting
+-- single addresses would let anyone with a handful of IPv4 addresses, or one
+-- IPv6 network (which holds more addresses than we have handlers), take
+-- every handler.
+data ClientKey = Client4 !HostAddress | Client6 !Word32 !Word32 | OtherClient
   deriving (Eq, Ord)
 
 clientKey :: SockAddr -> ClientKey
-clientKey (SockAddrInet _ a)                       = Client4 a
-clientKey (SockAddrInet6 _ _ (0, 0, 0xffff, a) _)  = Client4 (htonl a)
-clientKey (SockAddrInet6 _ _ a _)                  = Client6 a
+clientKey (SockAddrInet _ a)                       = Client4 (net4 (ntohl a))
+clientKey (SockAddrInet6 _ _ (0, 0, 0xffff, a) _)  = Client4 (net4 a)
+clientKey (SockAddrInet6 _ _ (a, b, _, _) _)       = Client6 a (b .&. 0xffffff00)
 clientKey _                                        = OtherClient
+
+net4 :: HostAddress -> HostAddress
+net4 = (.&. 0xffffff00)
 
 -- | Fork the thread accepting connections on the listening socket.
 forkListener :: MsgChan WebMessage -> QSem -> Socket -> IO ThreadId
@@ -287,10 +304,10 @@ terminateWebServer mbWait (WebServer send tid) =
   terminateThread mbWait tid (send $ Terminate NormalExit)
 
 -- | Read a request from a client, answer it, and close the connection. The
--- request head must arrive within 'headTimeout'.
-serveClient :: WebConfig -> Socket -> SockAddr -> IO ()
-serveClient conf client clientAddr = do
-  raw <- fmap join . timeout headTimeout $ readRequestHead client
+-- request head must arrive within the given time, in microseconds.
+serveClient :: WebConfig -> Int -> Socket -> SockAddr -> IO ()
+serveClient conf waitForHead client clientAddr = do
+  raw <- fmap join . timeout waitForHead $ readRequestHead client
   response <- case raw >>= parseRequest of
     Nothing -> return $ errorResponse 400 "Bad Request" "malformed request"
     Just req
@@ -325,6 +342,10 @@ metricsResponse conf peer req
 -- | How long, in microseconds, a client may take to send its request.
 headTimeout :: Int
 headTimeout = 3 * 10^(6 :: Int)
+
+-- | How long a client may take to send its request when we're busy.
+busyHeadTimeout :: Int
+busyHeadTimeout = 10^(6 :: Int)
 
 -- | Read the request line and headers, up to a limit.
 readRequestHead :: Socket -> IO (Maybe ByteString)
