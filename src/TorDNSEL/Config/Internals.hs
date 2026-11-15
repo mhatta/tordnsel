@@ -46,9 +46,10 @@ import Prelude hiding (log)
 import Control.Arrow ((***), second)
 import Control.Concurrent.MVar
 import qualified Control.Exception as E
-import Control.Monad (liftM, liftM2, ap, forever)
+import Control.Monad (liftM, liftM2, ap, forever, join)
 import Control.Monad.Except (MonadError(..))
 import Control.Monad.Fix (fix)
+import System.Timeout (timeout)
 import Data.Char (isSpace, toLower)
 import Data.Maybe (catMaybes)
 import qualified Data.ByteString.Char8 as B
@@ -547,13 +548,21 @@ handleMessage s (NewClient client signal) = do
     (\(e :: E.IOException) -> log Warn "Reading config from reconfigure socket failed: " e) $
     E.bracket (socketToHandle client ReadWriteMode) hClose $ \handle -> do
       -- B.hGetContents would close the (duplex) handle, and we still need
-      -- to write a response, so read up to EOF without closing it.
-      let readAll acc = do
-            chunk <- B.hGetSome handle 4096
-            if B.null chunk then return (B.concat $ reverse acc)
-                            else readAll (chunk : acc)
-      str <- readAll []
-      case parseConfigFile str >>= makeConfig of
+      -- to write a response, so read up to EOF without closing it. Read at
+      -- most 'maxReconfigSize' bytes, for at most 'reconfigTimeout': we
+      -- serve one client at a time, so one that never finishes mustn't
+      -- keep the socket from everyone else.
+      let readAll len acc
+            | len > maxReconfigSize = return Nothing
+            | otherwise = do
+                chunk <- B.hGetSome handle 4096
+                if B.null chunk
+                  then return . Just . B.concat $ reverse acc
+                  else readAll (len + B.length chunk) (chunk : acc)
+      mbStr <- timeout reconfigTimeout (readAll 0 [])
+      case maybe (Left ("the config was too large or took too long to \
+                        \arrive" ++))
+                 Right (join mbStr) >>= parseConfigFile >>= makeConfig of
         Left e -> do
           hCat handle "Parse error: " e "\r\n"
           log Warn "Parsing config from reconfigure socket failed: " e
@@ -581,6 +590,15 @@ handleMessage s (Exit tid reason)
       return s { listenerTid = newListenerTid }
   | isAbnormal reason = exit reason
   | otherwise = return s
+
+-- | The longest config we read from the reconfigure socket, in bytes.
+maxReconfigSize :: Int
+maxReconfigSize = 1024 * 1024
+
+-- | How long a reconfigure client may take to send its config, in
+-- microseconds.
+reconfigTimeout :: Int
+reconfigTimeout = 10 * 10^(6 :: Int)
 
 -- | Fork the listener thread.
 forkListener :: Socket -> (ReconfigMessage -> IO ()) -> IO ThreadId

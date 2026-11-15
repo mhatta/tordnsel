@@ -139,7 +139,8 @@ Verify the configuration file is valid and exit.
 \fB--reconfigure \fR\fIDIRECTORY\fP
 Read a configuration file from the standard input stream and use it to
 reconfigure the \fBtordnsel\fR process whose \fBRuntimeDirectory\fR is located
-at \fIDIRECTORY\fR.
+at \fIDIRECTORY\fR. The configuration must be at most 1 MB long and arrive
+within 10 seconds.
 .TP
 \fB--version\fP
 Display TorDNSEL version and exit.
