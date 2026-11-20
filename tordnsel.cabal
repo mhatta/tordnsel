@@ -15,7 +15,8 @@ maintainer:      Masayuki Hatta <mhatta@mhatta.org>
 copyright:       Public domain
 category:        Network
 build-type:      Simple
-tested-with:     GHC == 9.4.7, GHC == 9.10.3
+tested-with:     GHC == 9.4.*, GHC == 9.6.*, GHC == 9.8.*, GHC == 9.10.*,
+                 GHC == 9.12.*, GHC == 9.14.*
 extra-doc-files: README.md, ChangeLog, TODO.md, doc/torel-design.md
 extra-source-files: tests/data/*.txt
 data-files:      config/tordnsel.conf.sample, contrib/cacti-input.pl,

@@ -1,5 +1,11 @@
 # TorDNSEL: A Tor DNS-based Exit List
 
+[![CI](https://github.com/mhatta/tordnsel/actions/workflows/ci.yml/badge.svg)](https://github.com/mhatta/tordnsel/actions/workflows/ci.yml)
+[![Latest tag](https://img.shields.io/github/v/tag/mhatta/tordnsel?sort=semver&label=release)](https://github.com/mhatta/tordnsel/tags)
+[![Debian unstable](https://img.shields.io/debian/v/tordnsel/unstable?label=debian%20unstable)](https://tracker.debian.org/pkg/tordnsel)
+[![GHC](https://img.shields.io/badge/GHC-9.4%E2%80%939.14-5e5086?logo=haskell)](tordnsel.cabal)
+[![License: public domain](https://img.shields.io/badge/license-public%20domain-blue)](LICENSE)
+
 TorDNSEL answers, over DNS and HTTP, the question "which Tor exit nodes will
 connect to me?" Rather than listing every Tor relay, it only lists the exits
 whose exit policy actually permits connections to the service asking. The
